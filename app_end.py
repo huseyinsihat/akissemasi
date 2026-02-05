@@ -1257,7 +1257,7 @@ KRİTİK KURALLAR:
 
 3. ETİKET KURALLARI:
    - Doğal, anlaşılır Türkçe
-   - 2-6 kelime arası
+   - 2-5 kelime arası
    - p1, d1, io1 gibi KODLAR ETİKETTE GÖRÜNMESİN
    - Konuya özel, gerçekçi adımlar
    - ASLA "İşlem", "Adım", "Kontrol", "Uygula" gibi GENEL etiketler kullanma
@@ -1269,11 +1269,12 @@ KRİTİK KURALLAR:
    - Karar dalları: -->|Evet| ve -->|Hayır|
    - Döngü: -->|Tekrar| veya -->|Devam|
    - Gereksiz çapraz bağlantı yapma; akışı sıralı ve okunur tut
+   - Karar dışındaki bağlantılara etiket yazma
 
 5. DÜĞÜM SAYISI - KONUYA GÖRE GENİŞLET:
    - Basit konular (diş fırçalama): 6-8 düğüm
-   - Orta konular (okula gidiş, alışveriş): 8-12 düğüm
-   - Karmaşık konular (ATM, kayıt): 12-15 düğüm
+   - Orta konular (okula gidiş, alışveriş): 8-10 düğüm
+   - Karmaşık konular (ATM, kayıt): 10-12 düğüm
    - Konuya uygun, tekrarsız ve gerçekçi adımlar üret
 
 6. İYİ AKIŞ ŞEMASININı ÖZELLİKLERİ:
@@ -2356,6 +2357,51 @@ def ensure_decision_edge_labels(flow_state: StreamlitFlowState) -> None:
         
         # 3. ve sonraki dallar için etiket ekleme (boş bırak)
         # Kullanıcı isterse manuel ekleyebilir
+
+
+def is_generic_process_label(label: str) -> bool:
+    text = normalize_label_text(label).lower()
+    if not text:
+        return True
+    if text in {"işlem", "adım", "kontrol", "süreç", "uygula"}:
+        return True
+    if re.match(r".*adım\s*\d+$", text):
+        return True
+    if re.match(r".*step\s*\d+$", text):
+        return True
+    return False
+
+
+def simplify_flow_state(flow_state: StreamlitFlowState) -> None:
+    """Genel/tekrarlı süreç düğümlerini azaltır, akışı sadeleştirir."""
+    changed = True
+    while changed:
+        changed = False
+        out_edges, in_edges = build_graph(flow_state)
+        id_map = {n.id: n for n in flow_state.nodes}
+        for n in list(flow_state.nodes):
+            if get_node_kind(n) != "process":
+                continue
+            if is_start_node(n) or is_end_node(n):
+                continue
+            if not is_generic_process_label(get_node_label(n)):
+                continue
+            ins = in_edges.get(n.id, [])
+            outs = out_edges.get(n.id, [])
+            if len(ins) != 1 or len(outs) != 1:
+                continue
+            src = ins[0].source
+            tgt = outs[0].target
+            if src == tgt:
+                continue
+            # Yeni kenar ekle (etiket yok)
+            new_id = build_edge_id(src, tgt, "", "solid", salt=f"s{n.id}")
+            flow_state.edges.append(make_edge(new_id, src, tgt, label="", edge_type="smoothstep"))
+            # Eski kenarları ve düğümü kaldır
+            flow_state.edges = [e for e in flow_state.edges if e.id not in {ins[0].id, outs[0].id}]
+            flow_state.nodes = [node for node in flow_state.nodes if node.id != n.id]
+            changed = True
+            break
 
 
 def build_required_flow_template(topic: str) -> str:
@@ -4794,6 +4840,7 @@ def parse_ai_flow_or_fallback(code: str, topic: str) -> Tuple[Optional[Streamlit
     enforce_connected_flow(parsed_state)
     polish_ai_labels(parsed_state, topic)
     repair_ai_kinds(parsed_state)
+    simplify_flow_state(parsed_state)
     ensure_decision_edge_labels(parsed_state)
 
     kinds = {get_node_kind(n) for n in parsed_state.nodes}
@@ -4806,6 +4853,7 @@ def parse_ai_flow_or_fallback(code: str, topic: str) -> Tuple[Optional[Streamlit
         enforce_connected_flow(parsed_state)
         polish_ai_labels(parsed_state, topic)
         repair_ai_kinds(parsed_state)
+        simplify_flow_state(parsed_state)
         ensure_decision_edge_labels(parsed_state)
 
     return parsed_state, direction, None
