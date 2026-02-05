@@ -30,7 +30,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import streamlit as st
 
@@ -394,7 +394,7 @@ TIPS = [
     "Uzman modda sağ tık menüsü daha hızlı düzenleme sağlar.",
     "Şablonlarla hızlı başlangıç yapıp düzenleyebilirsiniz.",
     "PNG/SVG dışa aktarım için ölçek ayarını büyütebilirsiniz.",
-    "Bağımsız düğümler modunda ok çizilmez.",
+    "Bağımsız düğümler modunda ok çizilmez; düğümler tipleriyle üretilir.",
     "Akış şemasında bağlantısız düğüm kalmamasına dikkat edin.",
     "Döngü düğümünü tekrar eden adımlar için kullanın.",
     "Not düğümü, açıklama ve ipuçları için idealdir.",
@@ -606,6 +606,35 @@ NODE_KIND = {
         "shape": "double",
     },
 }
+
+# AI üretiminde zorunlu tutulacak düğüm türleri (akış modu için çekirdek set)
+AI_CORE_KINDS: Tuple[str, ...] = ("terminal", "process", "io", "decision")
+AI_EXTRA_KINDS: Tuple[str, ...] = (
+    "subprocess",
+    "database",
+    "connector",
+    "comment",
+    "loop",
+    "function",
+)
+AI_REQUIRED_KINDS: Tuple[str, ...] = AI_CORE_KINDS
+AI_MIN_NODES = 6
+
+# Bağımsız düğüm üretimi için hedef aralık
+FREE_NODES_MIN = 6
+FREE_NODES_MAX = 18
+FREE_KIND_CYCLE: Tuple[str, ...] = (
+    "terminal",
+    "process",
+    "io",
+    "decision",
+    "subprocess",
+    "database",
+    "connector",
+    "comment",
+    "loop",
+    "function",
+)
 
 # Mermaid şekil şablonları (id ve label kullanılır)
 MERMAID_NODE_TEMPLATES = {
@@ -1038,6 +1067,7 @@ def auto_save_to_file() -> None:
             "show_controls": st.session_state.show_controls,
             "show_minimap": st.session_state.show_minimap,
             "ai_mode": st.session_state.ai_mode,
+            "groq_api_key": st.session_state.groq_api_key,
             "show_grid": st.session_state.show_grid,
             "enable_context_menus": st.session_state.enable_context_menus,
             "auto_connect": st.session_state.auto_connect,
@@ -1117,6 +1147,9 @@ def show_recovery_banner() -> None:
                 st.session_state.show_controls = bool(autosave.get("show_controls", st.session_state.show_controls))
                 st.session_state.show_minimap = bool(autosave.get("show_minimap", st.session_state.show_minimap))
                 st.session_state.ai_mode = str(autosave.get("ai_mode") or st.session_state.ai_mode)
+                saved_key = autosave.get("groq_api_key")
+                if saved_key:
+                    st.session_state.groq_api_key = str(saved_key)
                 st.session_state.show_grid = bool(autosave.get("show_grid", st.session_state.show_grid))
                 st.session_state.enable_context_menus = bool(
                     autosave.get("enable_context_menus", st.session_state.enable_context_menus)
@@ -1186,7 +1219,7 @@ KRİTİK KURALLAR:
    - Son olarak bağlantıları yaz
    - HER DÜĞÜM MUTLAKA bir bağlantıya sahip olmalı (bağlantısız düğüm YASAK!)
 
-2. DÜĞÜM TİPLERİ - Doğru Şekil Kullan:
+2. DÜĞÜM TİPLERİ - Doğru Şekil Kullan (Konuya uygunsa farklı türleri kullan):
    
    Terminal (Başla/Bitir): ([...])
    s([Başla: Okula Gidiş])
@@ -1206,26 +1239,42 @@ KRİTİK KURALLAR:
    
    Alt Süreç: [[...]]
    sp1[[Duş Al ve Giyin]]
+
+   Veritabanı: [(...)]
+   db1[(Öğrenci Kaydı)]
    
-   Döngü: {...}
-   loop1{Tekrar Gerekli mi?}
+   Bağlantı: ((...))
+   c1((Sayfa Bağlantısı))
+
+   Not: [...]:::comment
+   n1[Not: Kontrol Noktası]:::comment
+
+   Döngü: {...}:::loop
+   loop1{Tekrar Gerekli mi?}:::loop
+
+   Fonksiyon: [[...]]:::function
+   fn1[[Fonksiyon Çağır]]:::function
 
 3. ETİKET KURALLARI:
    - Doğal, anlaşılır Türkçe
    - 2-6 kelime arası
    - p1, d1, io1 gibi KODLAR ETİKETTE GÖRÜNMESİN
    - Konuya özel, gerçekçi adımlar
+   - ASLA "İşlem", "Adım", "Kontrol", "Uygula" gibi GENEL etiketler kullanma
+   - Her etiket benzersiz olmalı (tekrar etme)
+   - Karar etiketleri soru şeklinde bitmeli (… mı/mi?)
 
 4. BAĞLANTILAR:
    - Normal ok: -->
    - Karar dalları: -->|Evet| ve -->|Hayır|
    - Döngü: -->|Tekrar| veya -->|Devam|
+   - Gereksiz çapraz bağlantı yapma; akışı sıralı ve okunur tut
 
 5. DÜĞÜM SAYISI - KONUYA GÖRE GENİŞLET:
    - Basit konular (diş fırçalama): 6-8 düğüm
    - Orta konular (okula gidiş, alışveriş): 8-12 düğüm
    - Karmaşık konular (ATM, kayıt): 12-15 düğüm
-   - MÜMKÜN OLDUĞUNCA DETAYLI VE GENİŞ yap!
+   - Konuya uygun, tekrarsız ve gerçekçi adımlar üret
 
 6. İYİ AKIŞ ŞEMASININı ÖZELLİKLERİ:
    - En az 1 karar noktası olmalı
@@ -1284,7 +1333,16 @@ flowchart TD
 - ```mermaid KULLANMA, sadece düz kod
 - Tüm düğümler bağlı olmalı
 - Konuya uygun, gerçekçi ve GENİŞ şema oluştur
+- Örnekler format içindir; kendi üretiminde konuya uygun düğüm tiplerini kullan
 """
+
+    def is_rate_limit_error(msg: str) -> bool:
+        text = (msg or "").lower()
+        if "rate_limit_exceeded" in text or "rate limit reached" in text:
+            return True
+        if "error code: 429" in text or "status code 429" in text or " http 429" in text:
+            return True
+        return False
 
     try:
         with st.spinner("🤖 AI akış şemasını düşünüyor..."):
@@ -1300,30 +1358,23 @@ flowchart TD
             content = response.choices[0].message.content.strip()
             # Markdown temizliği
             content = content.replace("```mermaid", "").replace("```", "").strip()
+            st.session_state.ai_last_error = ""
             return content
 
     except Exception as e:
         msg = str(e)
-        if "rate limit" in msg.lower() or "rate_limit" in msg.lower():
-            # Süreyi yakala: "Please try again in 15m18.432s"
+        if is_rate_limit_error(msg):
             m = re.search(r"in\\s+(\\d+)m(\\d+(?:\\.\\d+)?)s", msg)
             if m:
                 mins = int(m.group(1))
                 secs = float(m.group(2))
                 wait_sec = int(mins * 60 + secs)
                 st.session_state.ai_rate_limit_until = int(time.time()) + wait_sec
-            
-            # 5 saniye boyunca ekranda kalacak hata mesajı
-            error_placeholder = st.empty()
-            error_placeholder.error("⚠️ AI İSTEĞİ SINIR AŞILDI! Lütfen biraz bekleyip tekrar deneyin. (Bu mesaj 5 saniye sonra kaybolacak)")
-            time.sleep(5)
-            error_placeholder.empty()
+            st.session_state.ai_last_error = "rate_limit"
+            st.warning("⚠️ AI isteği sınır aşıldı! Lütfen biraz bekleyip tekrar deneyin.")
         else:
-            # Diğer hatalar için de 5 saniye göster
-            error_placeholder = st.empty()
-            error_placeholder.error(f"❌ AI HATASI: {e}\n\n(Bu mesaj 5 saniye sonra kaybolacak)")
-            time.sleep(5)
-            error_placeholder.empty()
+            st.session_state.ai_last_error = "error"
+            st.error(f"❌ AI Hatası: {e}")
         return None
 
 
@@ -1331,8 +1382,8 @@ def generate_free_nodes_with_ai(
     prompt: str,
     api_key: str,
     model: str = "llama-3.3-70b-versatile",
-) -> Optional[List[str]]:
-    """Groq ile 9 adet doğal, bağımsız düğüm etiketi üretir."""
+) -> Optional[List[Dict[str, str]]]:
+    """Groq ile bağımsız düğüm listesi üretir (label + kind)."""
     if Groq is None:
         st.error("Groq kütüphanesi yüklü değil. Lütfen `pip install groq` komutunu çalıştırın.")
         return None
@@ -1342,15 +1393,20 @@ def generate_free_nodes_with_ai(
 
     client = Groq(api_key=api_key)
     system_prompt = """
-Sen bir akış şeması içerik yazarı ve grafik tasarımcısın.
-GÖREV: Verilen konu için BAĞIMSIZ 9 adet kutu etiketi üret.
+Sen bir akış şeması içerik yazarı ve bilgi tasarımcısın.
+GÖREV: Verilen konu için BAĞIMSIZ düğüm listesi üret (ok yok).
+Akış şeması moduyla UYUMLU olsun; aynı ana adımlar yer alsın.
 
 KURALLAR:
-- Tam olarak 9 etiket üret
+- Düğüm sayısını konuya göre kendin seç: 6 ile 18 arası
 - Etiketler doğal ve anlamlı Türkçe olmalı
-- 2-5 kelime arası, fiil + nesne tercih et
+- 2-6 kelime arası, fiil + nesne tercih et
 - p1, d1, io1 gibi kısaltmalar KULLANMA
-- Sadece JSON dizi döndür: ["Etiket 1", "Etiket 2", ...]
+- "kind" alanı sadece şu değerlerden biri olmalı:
+  terminal, process, io, decision, subprocess, database, connector, comment, loop, function
+- Düğüm tipleri çeşitlensin ama konuya uymayan türleri zorla ekleme
+- Sadece JSON dizi döndür:
+  [{"label": "Etiket 1", "kind": "process"}, ...]
 - Markdown, açıklama, numara, ekstra metin KULLANMA
 """
     def parse_labels_fallback(text: str) -> List[str]:
@@ -1362,6 +1418,14 @@ KURALLAR:
             if p:
                 out.append(p)
         return out
+
+    def is_rate_limit_error(msg: str) -> bool:
+        text = (msg or "").lower()
+        if "rate_limit_exceeded" in text or "rate limit reached" in text:
+            return True
+        if "error code: 429" in text or "status code 429" in text or " http 429" in text:
+            return True
+        return False
 
     try:
         with st.spinner("🤖 AI bağımsız kutuları düşünüyor..."):
@@ -1377,34 +1441,54 @@ KURALLAR:
             raw = response.choices[0].message.content.strip()
             raw = raw.replace("```json", "").replace("```", "").strip()
             try:
-                labels = json.loads(raw)
-                if isinstance(labels, list):
-                    out = [str(x).strip() for x in labels if str(x).strip()]
-                    if len(out) >= 9:
-                        return out[:9]
+                payload = json.loads(raw)
+                if isinstance(payload, list):
+                    kind_cycle = list(FREE_KIND_CYCLE)
+                    out: List[Dict[str, str]] = []
+                    for idx, item in enumerate(payload):
+                        if isinstance(item, dict):
+                            label = str(item.get("label", "")).strip()
+                            kind = str(item.get("kind", "")).strip()
+                        else:
+                            label = str(item).strip()
+                            kind = kind_cycle[idx % len(kind_cycle)]
+                        if label:
+                            if kind not in NODE_KIND:
+                                kind = "process"
+                            out.append({"label": label, "kind": kind})
+                    if len(out) >= FREE_NODES_MIN:
+                        st.session_state.ai_last_error = ""
+                        return out
             except Exception:
                 pass
             fallback = parse_labels_fallback(raw)
-            if len(fallback) >= 9:
-                return fallback[:9]
+            if len(fallback) >= 6:
+                st.session_state.ai_last_error = ""
+                kind_cycle = list(FREE_KIND_CYCLE)
+                return [
+                    {"label": lbl, "kind": kind_cycle[idx % len(kind_cycle)]}
+                    for idx, lbl in enumerate(fallback)
+                ]
             return None
     except Exception as e:
         msg = str(e)
-        if "rate limit" in msg.lower() or "rate_limit" in msg.lower():
+        if is_rate_limit_error(msg):
             m = re.search(r"in\\s+(\\d+)m(\\d+(?:\\.\\d+)?)s", msg)
             if m:
                 mins = int(m.group(1))
                 secs = float(m.group(2))
                 wait_sec = int(mins * 60 + secs)
                 st.session_state.ai_rate_limit_until = int(time.time()) + wait_sec
-            st.error("⚠️ AI isteği sınır aşıldı! Lütfen biraz bekleyip tekrar deneyin.")
+            st.session_state.ai_last_error = "rate_limit"
+            st.warning("⚠️ AI isteği sınır aşıldı! Lütfen biraz bekleyip tekrar deneyin.")
         else:
+            st.session_state.ai_last_error = "error"
             st.error(f"❌ AI Hatası: {e}")
         return None
 
 
 def fallback_free_labels(topic: str, count: int = 9) -> List[str]:
-    base = (topic or "Adım").strip() or "Adım"
+    base = turkish_title((topic or "Adım").strip() or "Adım")
     return [f"{base} - Adım {i + 1}" for i in range(count)]
 
 
@@ -1989,6 +2073,50 @@ def sanitize_export_label(label: str, fallback: str = "") -> str:
     return s
 
 
+def _tr_upper_char(ch: str) -> str:
+    table = {
+        "i": "İ",
+        "ı": "I",
+        "ş": "Ş",
+        "ğ": "Ğ",
+        "ü": "Ü",
+        "ö": "Ö",
+        "ç": "Ç",
+    }
+    return table.get(ch, ch.upper())
+
+
+def _tr_lower_char(ch: str) -> str:
+    table = {
+        "İ": "i",
+        "I": "ı",
+        "Ş": "ş",
+        "Ğ": "ğ",
+        "Ü": "ü",
+        "Ö": "ö",
+        "Ç": "ç",
+    }
+    return table.get(ch, ch.lower())
+
+
+def turkish_title(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return text
+    words = re.split(r"(\s+)", text)
+    out = []
+    for w in words:
+        if w.isspace():
+            out.append(w)
+            continue
+        if not w:
+            continue
+        first = _tr_upper_char(w[0])
+        rest = "".join(_tr_lower_char(c) for c in w[1:])
+        out.append(first + rest)
+    return "".join(out)
+
+
 def node_to_mermaid(n: StreamlitFlowNode) -> str:
     nid = n.id
     label = mermaid_escape_label(get_node_label(n) or nid)
@@ -2131,30 +2259,75 @@ def enforce_connected_flow(flow_state: StreamlitFlowState) -> None:
             q.append(e.target)
 
     if len(reachable) < len(nodes):
-        flow_state.nodes = [n for n in nodes if n.id in reachable]
-        flow_state.edges = [e for e in edges if e.source in reachable and e.target in reachable]
+        # Bağımsız düğümleri düşürmek yerine zincire bağla
+        out_edges, _ = build_graph(flow_state)
+        dead_ends = [n for n in nodes if n.id in reachable and len(out_edges.get(n.id, [])) == 0]
+        tail = dead_ends[-1].id if dead_ends else nodes[0].id
+        for idx, n in enumerate([n for n in nodes if n.id not in reachable], start=1):
+            if n.id == tail:
+                continue
+            eid = build_edge_id(tail, n.id, "", "solid", salt=f"fix{idx}")
+            edges.append(make_edge(eid, tail, n.id, label="", edge_type="smoothstep"))
+            tail = n.id
+        flow_state.edges = edges
 
 
-def polish_ai_labels(flow_state: StreamlitFlowState) -> None:
+def polish_ai_labels(flow_state: StreamlitFlowState, topic: str = "") -> None:
     """AI etiketlerini daha doğal hale getirir."""
+    base = turkish_title((topic or "").strip())
+    generic_process = {"işlem", "adım", "iş", "süreç", "uygula", "kontrol"}
+    generic_io = {"giriş/çıkış", "giriş", "çıktı", "girdi", "output", "input"}
+    generic_decision = {"karar", "koşul", "durum"}
+    process_idx = 1
+    io_idx = 1
     for n in flow_state.nodes:
         kind = get_node_kind(n)
         label = get_node_label(n)
         raw = label or ""
-        lowered = raw.lower()
+        cleaned = normalize_label_text(raw)
+        if cleaned:
+            raw = cleaned
+        lowered = raw.lower().strip()
         if kind == "decision" and any(op in raw for op in ["%", "==", ">=", "<=", ">", "<"]):
             label = "Koşul sağlandı mı?"
+        elif kind == "decision" and (not raw.strip() or lowered in generic_decision):
+            label = "Koşul sağlandı mı?"
+        elif kind == "io" and (not raw.strip() or lowered in generic_io):
+            label = "Giriş Bilgisi Al" if io_idx == 1 else "Sonucu Göster"
+            io_idx += 1
+        elif kind == "process" and (not raw.strip() or lowered in generic_process):
+            if base:
+                label = f"{base} - Adım {process_idx}"
+            else:
+                label = f"Adım {process_idx}"
+            process_idx += 1
         elif len(raw.strip()) < 3:
             label = NODE_KIND.get(kind, NODE_KIND["process"])["default"]
         elif any(tok in lowered for tok in ["==", "%", ">=", "<=", ">", "<"]):
             label = raw.replace("%", " mod ").replace("==", " eşit mi ").replace(">=", " en az ").replace("<=", " en fazla ")
             label = label.replace(">", " büyük mü ").replace("<", " küçük mü ")
             label = re.sub(r"\s+", " ", label).strip()
+        if label == (label or "").lower():
+            label = turkish_title(label)
         if label != raw:
             data = getattr(n, "data", None) or {}
             data["label"] = label
             data["content"] = node_markdown(label, kind)
             n.data = data  # type: ignore[attr-defined]
+
+
+def repair_ai_kinds(flow_state: StreamlitFlowState) -> None:
+    """Etiketten düğüm tipini tahmin edip düzeltir."""
+    for n in flow_state.nodes:
+        kind = get_node_kind(n)
+        label = normalize_label_text(get_node_label(n))
+        if kind not in NODE_KIND or kind == "process":
+            guessed = guess_kind_from_label(label)
+            if guessed != kind and guessed in NODE_KIND:
+                data = getattr(n, "data", None) or {}
+                data["kind"] = guessed
+                data["content"] = node_markdown(label or NODE_KIND[guessed]["default"], guessed)
+                n.data = data  # type: ignore[attr-defined]
 
 
 def ensure_decision_edge_labels(flow_state: StreamlitFlowState) -> None:
@@ -2187,29 +2360,23 @@ def ensure_decision_edge_labels(flow_state: StreamlitFlowState) -> None:
 
 def build_required_flow_template(topic: str) -> str:
     """Zorunlu düğüm tiplerini içeren güvenli akış şeması üretir."""
-    topic = (topic or "Akış").strip()
+    topic = turkish_title((topic or "Akış").strip() or "Akış")
     return f"""flowchart TD
     s([Başla: {topic}])
     io1[/Giriş Bilgisi Al/]
     p1[Hazırlık Yap]
     d1{{Koşul Sağlandı mı?}}
-    l1{{Tekrar Gerekli mi?}}:::loop
     p2[Adımı Uygula]
-    fn1[[Fonksiyon Çağır]]:::function
-    c1((Bağlantı))
-    n1[Not: Kontrol Noktası]:::comment
+    io2[/Sonucu Göster/]
     e([Bitir: Tamamlandı])
     
     s --> io1
     io1 --> p1
     p1 --> d1
     d1 -->|Evet| p2
-    d1 -->|Hayır| l1
-    l1 --> p2
-    p2 --> fn1
-    fn1 --> c1
-    c1 --> n1
-    n1 --> e
+    d1 -->|Hayır| p1
+    p2 --> io2
+    io2 --> e
 """.strip()
 
 
@@ -3454,6 +3621,10 @@ def initialize_state() -> None:
             st.session_state.groq_api_key = str(secret_key)
         elif env_key:
             st.session_state.groq_api_key = str(env_key)
+        else:
+            autosave = load_autosave()
+            if autosave and autosave.get("groq_api_key"):
+                st.session_state.groq_api_key = str(autosave.get("groq_api_key"))
 
     if "ai_model" not in st.session_state:
         st.session_state.ai_model = "llama-3.3-70b-versatile"
@@ -3475,6 +3646,9 @@ def initialize_state() -> None:
 
     if "ai_prompt_text" not in st.session_state:
         st.session_state.ai_prompt_text = ""
+
+    if "ai_last_error" not in st.session_state:
+        st.session_state.ai_last_error = ""
 
     # UI toggles
     if "show_code" not in st.session_state:
@@ -3533,9 +3707,6 @@ def initialize_state() -> None:
 
     if "auto_connect_fired" not in st.session_state:
         st.session_state.auto_connect_fired = False
-
-    if "auto_connect_anchor" not in st.session_state:
-        st.session_state.auto_connect_anchor = None
 
     if "auto_connect_anchor" not in st.session_state:
         st.session_state.auto_connect_anchor = None
@@ -4062,53 +4233,56 @@ def render_view_mode_panel(container: st.delta_generator.DeltaGenerator) -> None
 def render_ai_panel(container: st.delta_generator.DeltaGenerator) -> None:
     """Sidebar'da AI Asistanı panelini gösterir."""
     with container.expander("✨ AI Asistanı (Metinden Şemaya)", expanded=True):
-        st.caption("🚀 Groq ile gerçekçi akış şeması üretimi")
-        st.caption("Model: llama-3.3-70b-versatile")
+        st.caption("🚀 Groq ile metinden şema üretimi")
         container.info(
-            "Akış Şeması: Oklarla bağlı, zorunlu tipleri içeren tam akış üretir.\n"
-            "Bağımsız Düğümler: Sadece kutular üretir, ok çizmez.",
+            "Akış Şeması: Oklarla bağlı akış üretir. Bağımsız Düğümler: Ok çizmez, tipli kutular üretir.",
             icon="ℹ️",
         )
+        st.caption("API anahtarını kimseyle paylaşmayın.")
+
+        with container.expander("API Anahtarı Nasıl Alınır?", expanded=False):
+            container.markdown(
+                "1. `console.groq.com/keys` adresine git\n"
+                "2. `API Anahtarı Oluştur` butonuna tıkla\n"
+                "3. `gsk_` ile başlayan anahtarı kopyalayıp aşağıya yapıştır"
+            )
         
-        # API Key Talimatları - Belirgin bir şekilde
-        st.markdown("""
-        <div style="background: #FFF3CD; padding: 12px; border-radius: 8px; border-left: 4px solid #FFC107; margin-bottom: 12px;">
-            <strong>📌 API Anahtarı Nasıl Alınır?</strong><br>
-            1️⃣ <a href="https://console.groq.com/keys" target="_blank" style="color: #0066CC; font-weight: bold;">console.groq.com/keys</a> adresine git<br>
-            2️⃣ <strong>"API Anahtarı Oluştur"</strong> butonuna tıkla<br>
-            3️⃣ İsim alanını boş bırakabilirsin<br>
-            4️⃣ <strong>"Onayla"</strong> butonuna tıkla<br>
-            5️⃣ Gelen <code>gsk_</code> ile başlayan anahtarı kopyala ve aşağıya yapıştır
-        </div>
-        """, unsafe_allow_html=True)
-        
-        api_key = st.text_input(
-            "Groq API Key (gsk_ ile başlar)", 
-            value=st.session_state.groq_api_key, 
-            type="password",
-            placeholder="gsk_...",
-            help="Yukarıdaki adımları takip ederek API anahtarınızı alın"
-        )
-        st.session_state.groq_api_key = api_key
+        col_key, col_clear = st.columns([8, 1])
+        with col_key:
+            api_key = st.text_input(
+                "Groq API Key (gsk_ ile başlar)",
+                value=st.session_state.groq_api_key,
+                type="password",
+                placeholder="gsk_...",
+                help="Yukarıdaki adımları takip ederek API anahtarınızı alın",
+            )
+            st.session_state.groq_api_key = api_key
+        with col_clear:
+            if st.button("🗑️", help="Kaydedilmiş API anahtarını sil", use_container_width=True):
+                st.session_state.groq_api_key = ""
+                auto_save_to_file()
+                st.rerun()
 
         prompt = st.text_area(
-            "Akış Tanımı", 
-            placeholder="Örn: okula gidiş, kahvaltı hazırlama, ATM para çekme...", 
-            height=100,
-            help="Ne yapılacağını kısaca yazın. AI gerçekçi bir akış şeması oluşturacak.",
+            "Akış Tanımı",
+            placeholder="Konu + amaç + 5-8 adım + 1-2 karar yazın (ör. okula gidiş).",
+            height=110,
+            help="Kısa ve net yazın: konu, amaç, ana adımlar ve kararlar.",
             key="ai_prompt_text",
         )
         prompt = st.session_state.ai_prompt_text
         
         with container.expander("🧩 İdeal Tanım Şablonu", expanded=False):
+            container.caption("En iyi sonuç için şu yapıyı kullan: konu + amaç + ana adımlar + kararlar + giriş/çıkış.")
             template = (
-                "Konu: (kısaca yaz)\n"
-                "Amaç: (ne elde edilecek)\n"
-                "Girişler: (veri/olay)\n"
-                "Çıkışlar: (sonuç)\n"
-                "Kararlar: (evet/hayır)\n"
-                "Döngü: (tekrar eden adım)\n"
-                "Notlar: (özel şartlar)"
+                "Konu: (kısa başlık)\n"
+                "Amaç: (hedef)\n"
+                "Başlangıç: (tetikleyici olay)\n"
+                "Ana Adımlar: adım1; adım2; adım3; ...\n"
+                "Kararlar: soru? -> Evet: ... / Hayır: ...\n"
+                "Girişler: (alınan bilgiler)\n"
+                "Çıkışlar: (üretilen sonuç)\n"
+                "Notlar: (özel şartlar / istisna)"
             )
             container.code(template, language="text")
             col_t1, col_t2 = container.columns(2)
@@ -4120,11 +4294,12 @@ def render_ai_panel(container: st.delta_generator.DeltaGenerator) -> None:
                 sample = (
                     "Konu: Okula gidiş\n"
                     "Amaç: Okula zamanında varmak\n"
-                    "Girişler: Alarm çaldı\n"
+                    "Başlangıç: Alarm çaldı\n"
+                    "Ana Adımlar: Uyan; Hazırlan; Kahvaltı yap; Çantayı al\n"
+                    "Kararlar: Servis var mı? -> Evet: Servise bin / Hayır: Yürüyerek git\n"
+                    "Girişler: Saat, hava durumu\n"
                     "Çıkışlar: Okula varıldı\n"
-                    "Kararlar: Servis var mı?\n"
-                    "Döngü: Servis yoksa yürüyüşe geç\n"
-                    "Notlar: Kahvaltı sonrası hazırlan"
+                    "Notlar: Geç kalırsam hızlı rota"
                 )
                 if col_t2.button("Örnek Doldur", use_container_width=True, key="fill_prompt_sample"):
                     st.session_state.ai_prompt_text = sample
@@ -4157,7 +4332,7 @@ def render_ai_panel(container: st.delta_generator.DeltaGenerator) -> None:
                         if labels:
                             apply_free_nodes(labels, name="AI Serbest")
                         else:
-                            apply_free_nodes(fallback_free_labels(prompt), name="Serbest (Şablon)")
+                            apply_free_nodes(fallback_free_labels(prompt, count=FREE_NODES_MIN), name="Serbest (Şablon)")
                     else:
                         # Akış Şeması Modu
                         with st.spinner("🤖 AI akış şeması oluşturuyor..."):
@@ -4570,6 +4745,7 @@ def apply_template(code: str, name: str = "Şablon") -> None:
 
     st.session_state.flow_state = parsed_state
     st.session_state.direction = direction
+    st.session_state.force_layout_reset = True
     normalize_state(st.session_state.flow_state)
     sync_counters_from_state(st.session_state.flow_state)
     sync_code_text(code)
@@ -4585,34 +4761,74 @@ def apply_template(code: str, name: str = "Şablon") -> None:
     st.rerun()
 
 
-def apply_ai_flow_template(code: str, topic: str, name: str = "AI Şema") -> None:
-    """AI şema çıktısını uygular, bağlantısız düğümleri temizler ve ekrana yansıtır."""
-    code = (code or "").strip()
-    
+def clean_ai_code(code: str) -> str:
+    """AI çıktısından yalnızca Mermaid akış bloğunu ayıklar."""
     if not code:
-        toast_error("AI boş kod üretti. Lütfen farklı bir tanım deneyin.")
-        return
+        return code
+    cleaned = code.replace("```mermaid", "").replace("```", "").strip()
+    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+    start_idx = None
+    for idx, ln in enumerate(lines):
+        if FLOW_HEADER_RE.match(ln) or ln.lower().startswith("flowchart") or ln.lower().startswith("graph"):
+            start_idx = idx
+            break
+    if start_idx is None:
+        return cleaned
+    return "\n".join(lines[start_idx:])
 
-    # AI çıktısını parse et
+
+def parse_ai_flow_or_fallback(code: str, topic: str) -> Tuple[Optional[StreamlitFlowState], str, Optional[str]]:
+    """AI çıktısını parse eder; hatada güvenli şablona düşer."""
+    code = (code or "").strip()
+    code = clean_ai_code(code)
+    if not code:
+        code = build_required_flow_template(topic)
+
     parsed_state, error, direction = parse_mermaid(code)
-    
     if error or parsed_state is None:
-        toast_error(f"AI çıktısı işlenemedi: {error or 'Geçersiz Mermaid kodu'}. Lütfen tekrar deneyin.")
-        return
+        code = build_required_flow_template(topic)
+        parsed_state, error, direction = parse_mermaid(code)
+        if error or parsed_state is None:
+            return None, direction, error or "Geçersiz Mermaid kodu"
 
-    # Bağlantısız düğümleri temizle
     enforce_connected_flow(parsed_state)
-    
-    # En az 3 düğüm olmalı (başla, en az 1 işlem, bitir)
-    if len(parsed_state.nodes) < 3:
-        toast_error(f"Çok az düğüm ({len(parsed_state.nodes)}). En az 3 düğüm gerekli. Lütfen daha detaylı bir tanım yazın.")
-        return
-
-    # Etiketleri temizle ve düzelt
-    polish_ai_labels(parsed_state)
+    polish_ai_labels(parsed_state, topic)
+    repair_ai_kinds(parsed_state)
     ensure_decision_edge_labels(parsed_state)
 
-    # State'i güncelle - ekrana yansıt
+    kinds = {get_node_kind(n) for n in parsed_state.nodes}
+    required = set(AI_REQUIRED_KINDS)
+    if len(parsed_state.nodes) < AI_MIN_NODES or not required.issubset(kinds):
+        code = build_required_flow_template(topic)
+        parsed_state, error, direction = parse_mermaid(code)
+        if error or parsed_state is None:
+            return None, direction, "Şablon uygulanamadı."
+        enforce_connected_flow(parsed_state)
+        polish_ai_labels(parsed_state, topic)
+        repair_ai_kinds(parsed_state)
+        ensure_decision_edge_labels(parsed_state)
+
+    return parsed_state, direction, None
+
+
+def extract_free_nodes_from_state(flow_state: StreamlitFlowState) -> List[Dict[str, str]]:
+    """State içinden label/kind bilgisi çıkarır."""
+    items: List[Dict[str, str]] = []
+    for n in sorted(flow_state.nodes, key=lambda x: x.id):
+        label = get_node_label(n) or n.id
+        kind = get_node_kind(n)
+        items.append({"label": label, "kind": kind})
+    return items
+
+
+def apply_ai_flow_template(code: str, topic: str, name: str = "AI Şema") -> None:
+    """AI şema çıktısını uygular; hatada güvenli şablona düşer."""
+    parsed_state, direction, error = parse_ai_flow_or_fallback(code, topic)
+    if error or parsed_state is None:
+        toast_error(f"AI çıktısı işlenemedi: {error or 'Geçersiz Mermaid kodu'}.")
+        return
+
+    # State'i güncelle
     st.session_state.flow_state = parsed_state
     st.session_state.direction = direction
     normalize_state(st.session_state.flow_state)
@@ -4621,7 +4837,6 @@ def apply_ai_flow_template(code: str, topic: str, name: str = "AI Şema") -> Non
     st.session_state.task_check_fired = False
     st.session_state.selected_node_id = None
     st.session_state.selected_edge_id = None
-    st.session_state.auto_connect_anchor = None
     st.session_state.auto_connect_anchor = None
 
     # Tarihe ekle
@@ -4633,23 +4848,101 @@ def apply_ai_flow_template(code: str, topic: str, name: str = "AI Şema") -> Non
     st.rerun()
 
 
-def apply_free_nodes(labels: List[str], name: str = "Serbest") -> None:
-    """Bağımsız 9 kutu oluşturur (ok yok)."""
-    labels = [l.strip() for l in labels if l and l.strip()]
-    if not labels:
+def normalize_label_text(label: str) -> str:
+    """Etiketten emoji/simgeleri temizle ve sadeleştir."""
+    text = (label or "").strip()
+    text = re.sub(r"^[^\wÇĞİÖŞÜçğıöşü]+", "", text, flags=re.UNICODE).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def guess_kind_from_label(label: str) -> str:
+    """Basit anahtar kelime ile düğüm tipini tahmin et."""
+    text = normalize_label_text(label).lower()
+    if any(w in text for w in ["başla", "başlangıç", "bitir", "bitti", "son"]):
+        return "terminal"
+    if "?" in label or any(w in text for w in ["mı", "mi", "mu", "mü", "durum", "koşul"]):
+        return "decision"
+    if any(w in text for w in ["giriş", "çıktı", "girdi", "oku", "yaz", "al", "gir"]):
+        return "io"
+    if any(w in text for w in ["veritabanı", "kayıt", "db", "tablo", "sakla"]):
+        return "database"
+    if any(w in text for w in ["alt süreç", "alt adım", "alt işlem"]):
+        return "subprocess"
+    if any(w in text for w in ["fonksiyon", "çağır", "çağrısı"]):
+        return "function"
+    if any(w in text for w in ["not", "açıklama", "bilgi", "ipucu"]):
+        return "comment"
+    if any(w in text for w in ["döngü", "tekrar", "yeniden", "loop"]):
+        return "loop"
+    if any(w in text for w in ["bağlantı", "konnektör", "devam noktası"]):
+        return "connector"
+    return "process"
+
+
+def normalize_free_node_items(
+    items: Iterable[Union[str, Dict[str, str]]],
+    min_count: int = 0,
+    max_count: int = FREE_NODES_MAX,
+) -> List[Dict[str, str]]:
+    """Bağımsız düğüm verilerini normalize eder."""
+    normalized: List[Dict[str, str]] = []
+    for item in items:
+        if isinstance(item, dict):
+            label = str(item.get("label", "")).strip()
+            kind = str(item.get("kind", "")).strip()
+        else:
+            label = str(item).strip()
+            kind = "process"
+
+        if not label:
+            continue
+        if label == label.lower():
+            label = turkish_title(label)
+        if kind not in NODE_KIND:
+            kind = guess_kind_from_label(label)
+        if kind not in NODE_KIND:
+            kind = "process"
+        normalized.append({"label": label, "kind": kind})
+
+    if max_count and len(normalized) > max_count:
+        normalized = normalized[:max_count]
+
+    if min_count and len(normalized) < min_count:
+        base = normalized[0]["label"] if normalized else "Adım"
+        extras = fallback_free_labels(base, count=min_count - len(normalized))
+        kind_cycle = list(FREE_KIND_CYCLE)
+        for idx, lbl in enumerate(extras):
+            kind = kind_cycle[(len(normalized) + idx) % len(kind_cycle)]
+            if lbl == lbl.lower():
+                lbl = turkish_title(lbl)
+            normalized.append({"label": lbl, "kind": kind})
+
+    return normalized
+
+
+def apply_free_nodes(
+    items: List[Union[str, Dict[str, str]]],
+    name: str = "Serbest",
+    min_count: int = FREE_NODES_MIN,
+) -> None:
+    """Bağımsız kutuları oluşturur (ok yok)."""
+    nodes_input = normalize_free_node_items(items, min_count=min_count, max_count=FREE_NODES_MAX)
+    if not nodes_input:
         toast_error("Serbest mod için etiket üretilemedi.")
         return
-    # 3x3 grid yerleşim
+
+    # 3xN grid yerleşim
     nodes: List[StreamlitFlowNode] = []
     spacing_x = 260.0
     spacing_y = 160.0
     cols = 3
-    for idx, label in enumerate(labels[:9], start=1):
+    for idx, item in enumerate(nodes_input, start=1):
         row = (idx - 1) // cols
         col = (idx - 1) % cols
         pos = (col * spacing_x, row * spacing_y)
         nid = f"n{idx}"
-        nodes.append(make_node(nid, label, "process", pos=pos))
+        nodes.append(make_node(nid, item["label"], item["kind"], pos=pos))
 
     st.session_state.flow_state = make_flow_state(nodes, [])
     st.session_state.direction = "TD"
