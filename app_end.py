@@ -25,6 +25,7 @@ import io
 import json
 import re
 import time
+import os
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -51,6 +52,11 @@ try:
     import requests  # type: ignore
 except Exception:
     requests = None
+
+try:
+    from groq import Groq  # type: ignore
+except Exception:
+    Groq = None
 
 try:
     from reportlab.lib.pagesizes import A4  # type: ignore
@@ -91,7 +97,7 @@ DEFAULT_LAYOUT_MODE = "Otomatik (Ağaç)"
 DEFAULT_EXPORT_FORMAT = "PNG"
 
 DEFAULT_CODE = """flowchart TD
-    start([Başla]) --> p1[İşlem] --> end([Bitir])
+    start([Başla])
 """.strip()
 
 TEMPLATES: Dict[str, Dict[str, str]] = {
@@ -105,6 +111,26 @@ TEMPLATES: Dict[str, Dict[str, str]] = {
         "description": "Temiz bir başlangıç",
         "code": """flowchart TD
     S([Başlangıç])
+""".strip(),
+    },
+    "Diş Fırçalama": {
+        "description": "Günlük rutin örneği",
+        "code": """flowchart TD
+    s([Başla])
+    io1[/Diş Fırçası Al/]
+    p1[Macun Sür]
+    p2[Fırçala]
+    d1{2 Dakika Geçti mi?}
+    p3[Ağzını Çalkala]
+    e([Bitir])
+    
+    s --> io1
+    io1 --> p1
+    p1 --> p2
+    p2 --> d1
+    d1 -->|Hayır| p2
+    d1 -->|Evet| p3
+    p3 --> e
 """.strip(),
     },
     "Karar Yapısı": {
@@ -356,8 +382,31 @@ LAYOUT_MODES = ["Otomatik (Ağaç)", "Manuel (Elle)"]
 SUGGESTED_LABELS = {
     "process": ["toplam = toplam + sayi", "sayac = sayac + 1", "ortalama = toplam / n"],
     "io": ["sayi al", "sonucu yaz"],
-    "decision": ["sayi % 2 == 0 ?", "not >= 50 ?", "devam edilsin mi?"],
+    "decision": ["Karar"],
 }
+
+TIPS = [
+    "Başla düğümünü seç → üst paletten yeni düğüm ekle → otomatik bağlanır.",
+    "Bağlantı etiketleri karar noktalarını netleştirir (Evet/Hayır).",
+    "Düğüm metinlerini kısa ve net tut (2–5 kelime).",
+    "Karar düğümlerinde en az iki çıkış oluştur.",
+    "Akış yönünü Ayarlar sekmesinden değiştirebilirsiniz.",
+    "Uzman modda sağ tık menüsü daha hızlı düzenleme sağlar.",
+    "Şablonlarla hızlı başlangıç yapıp düzenleyebilirsiniz.",
+    "PNG/SVG dışa aktarım için ölçek ayarını büyütebilirsiniz.",
+    "Bağımsız düğümler modunda ok çizilmez.",
+    "Akış şemasında bağlantısız düğüm kalmamasına dikkat edin.",
+    "Döngü düğümünü tekrar eden adımlar için kullanın.",
+    "Not düğümü, açıklama ve ipuçları için idealdir.",
+    "Fonksiyon düğümü, alt işlem çağrıları için uygundur.",
+    "Bağlantı düğümü, uzun akışları temizler.",
+    "Giriş/Çıkış düğümü kullanıcı etkileşimi içindir.",
+    "Yeni şemaya geç butonu seçimi sıfırlar.",
+    "Şema modunda düğümler otomatik bağlanır.",
+    "Seçili düğüm varsa yeni düğüm altına eklenir.",
+    "Karar etiketleri boşsa otomatik Evet/Hayır atanır.",
+    "Kılavuz sekmesinde düğüm tiplerini hızlıca öğrenebilirsiniz.",
+]
 
 TASK_LIBRARY = {
     "Sayı Tek/Çift Kontrolü": {
@@ -988,6 +1037,8 @@ def auto_save_to_file() -> None:
             "show_code": st.session_state.show_code,
             "show_controls": st.session_state.show_controls,
             "show_minimap": st.session_state.show_minimap,
+            "ai_mode": st.session_state.ai_mode,
+            "show_grid": st.session_state.show_grid,
             "enable_context_menus": st.session_state.enable_context_menus,
             "auto_connect": st.session_state.auto_connect,
             "node_spacing": st.session_state.node_spacing,
@@ -1065,6 +1116,8 @@ def show_recovery_banner() -> None:
                 st.session_state.show_code = bool(autosave.get("show_code", st.session_state.show_code))
                 st.session_state.show_controls = bool(autosave.get("show_controls", st.session_state.show_controls))
                 st.session_state.show_minimap = bool(autosave.get("show_minimap", st.session_state.show_minimap))
+                st.session_state.ai_mode = str(autosave.get("ai_mode") or st.session_state.ai_mode)
+                st.session_state.show_grid = bool(autosave.get("show_grid", st.session_state.show_grid))
                 st.session_state.enable_context_menus = bool(
                     autosave.get("enable_context_menus", st.session_state.enable_context_menus)
                 )
@@ -1080,6 +1133,11 @@ def show_recovery_banner() -> None:
                     autosave.get("show_pseudocode", st.session_state.show_pseudocode)
                 )
 
+                if st.session_state.ai_mode == "Şema (Oklu)":
+                    st.session_state.ai_mode = "Akış Şeması"
+                elif st.session_state.ai_mode == "Serbest (Bağımsız)":
+                    st.session_state.ai_mode = "Bağımsız Düğümler"
+
                 st.session_state.flow_state = parsed_state  # type: ignore[assignment]
                 normalize_state(st.session_state.flow_state)
                 sync_counters_from_state(st.session_state.flow_state)
@@ -1094,6 +1152,260 @@ def show_recovery_banner() -> None:
             if st.button("🗑️ Yeni Başla", key="recover_no", use_container_width=True):
                 AUTOSAVE_FILE.unlink(missing_ok=True)
                 st.rerun()
+
+
+# =============================================================================
+# AI (Groq) Fonksiyonu
+# =============================================================================
+
+def generate_flow_with_ai(prompt: str, api_key: str, model: str = "llama-3.3-70b-versatile") -> Optional[str]:
+    """Groq kullanarak metin açıklamasından Mermaid kodu üretir.
+    
+    Args:
+        prompt: Kullanıcının akış tanımı
+        api_key: Groq API anahtarı
+        model: Kullanılacak AI modeli
+    """
+    if Groq is None:
+        st.error("Groq kütüphanesi yüklü değil. Lütfen `pip install groq` komutunu çalıştırın.")
+        return None
+    
+    if not api_key:
+        st.warning("Lütfen bir Groq API Anahtarı girin.")
+        return None
+
+    client = Groq(api_key=api_key)
+    
+    system_prompt = """Sen profesyonel bir akış şeması uzmanısın. Kullanıcının verdiği konuya uygun, GENİŞ, DETAYLI ve gerçekçi bir akış şeması oluştur.
+
+KRİTİK KURALLAR:
+
+1. DÜĞÜM YAPISI:
+   - ÖNCE tüm düğümleri tanımla (her düğüm ayrı satırda)
+   - Sonra boş satır bırak
+   - Son olarak bağlantıları yaz
+   - HER DÜĞÜM MUTLAKA bir bağlantıya sahip olmalı (bağlantısız düğüm YASAK!)
+
+2. DÜĞÜM TİPLERİ - Doğru Şekil Kullan:
+   
+   Terminal (Başla/Bitir): ([...])
+   s([Başla: Okula Gidiş])
+   e([Bitir: Derste])
+   
+   İşlem (Eylem/İş): [...]
+   p1[Kahvaltı Yap]
+   p2[Çantayı Hazırla]
+   
+   Karar (Koşul/Soru): {...}
+   d1{Servis Var mı?}
+   d2{Hava Yağmurlu mu?}
+   
+   Giriş/Çıkış: [/...../]
+   io1[/Alarm Çaldı/]
+   io2[/Okula Varıldı/]
+   
+   Alt Süreç: [[...]]
+   sp1[[Duş Al ve Giyin]]
+   
+   Döngü: {...}
+   loop1{Tekrar Gerekli mi?}
+
+3. ETİKET KURALLARI:
+   - Doğal, anlaşılır Türkçe
+   - 2-6 kelime arası
+   - p1, d1, io1 gibi KODLAR ETİKETTE GÖRÜNMESİN
+   - Konuya özel, gerçekçi adımlar
+
+4. BAĞLANTILAR:
+   - Normal ok: -->
+   - Karar dalları: -->|Evet| ve -->|Hayır|
+   - Döngü: -->|Tekrar| veya -->|Devam|
+
+5. DÜĞÜM SAYISI - KONUYA GÖRE GENİŞLET:
+   - Basit konular (diş fırçalama): 6-8 düğüm
+   - Orta konular (okula gidiş, alışveriş): 8-12 düğüm
+   - Karmaşık konular (ATM, kayıt): 12-15 düğüm
+   - MÜMKÜN OLDUĞUNCA DETAYLI VE GENİŞ yap!
+
+6. İYİ AKIŞ ŞEMASININı ÖZELLİKLERİ:
+   - En az 1 karar noktası olmalı
+   - Başlangıç ve bitiş açık olmalı
+   - Tüm olası durumlar kapsamalı
+   - Gerçekçi ve mantıklı adımlar
+
+ÖRNEK 1 - OKULA GİDİŞ (8 DÜĞÜM):
+flowchart TD
+    s([Başla: Okula Gidiş])
+    io1[/Alarm Çaldı/]
+    p1[Kalk ve Hazırlan]
+    p2[Kahvaltı Yap]
+    d1{Servis Var mı?}
+    p3[Servisi Bekle]
+    p4[Yürüyerek Git]
+    io2[/Okula Varıldı/]
+    e([Bitir: Sınıfta])
+    
+    s --> io1
+    io1 --> p1
+    p1 --> p2
+    p2 --> d1
+    d1 -->|Evet| p3
+    d1 -->|Hayır| p4
+    p3 --> io2
+    p4 --> io2
+    io2 --> e
+
+ÖRNEK 2 - ALIŞVERİŞ YAPMA (10 DÜĞÜM):
+flowchart TD
+    s([Başla: Alışveriş])
+    p1[Alışveriş Listesi Hazırla]
+    p2[Markete Git]
+    io1[/Ürünleri Gez/]
+    p3[Sepete Koy]
+    d1{Liste Tamamlandı mı?}
+    p4[Kasaya Git]
+    io2[/Ödeme Yap/]
+    p5[Poşetleri Al]
+    e([Bitir: Eve Dön])
+    
+    s --> p1
+    p1 --> p2
+    p2 --> io1
+    io1 --> p3
+    p3 --> d1
+    d1 -->|Hayır| io1
+    d1 -->|Evet| p4
+    p4 --> io2
+    io2 --> p5
+    p5 --> e
+
+ÖNEMLİ:
+- flowchart TD ile başla
+- ```mermaid KULLANMA, sadece düz kod
+- Tüm düğümler bağlı olmalı
+- Konuya uygun, gerçekçi ve GENİŞ şema oluştur
+"""
+
+    try:
+        with st.spinner("🤖 AI akış şemasını düşünüyor..."):
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Şu konuda akış şeması oluştur: {prompt}"}
+                ],
+                temperature=0.2, 
+                max_tokens=1500,
+            )
+            content = response.choices[0].message.content.strip()
+            # Markdown temizliği
+            content = content.replace("```mermaid", "").replace("```", "").strip()
+            return content
+
+    except Exception as e:
+        msg = str(e)
+        if "rate limit" in msg.lower() or "rate_limit" in msg.lower():
+            # Süreyi yakala: "Please try again in 15m18.432s"
+            m = re.search(r"in\\s+(\\d+)m(\\d+(?:\\.\\d+)?)s", msg)
+            if m:
+                mins = int(m.group(1))
+                secs = float(m.group(2))
+                wait_sec = int(mins * 60 + secs)
+                st.session_state.ai_rate_limit_until = int(time.time()) + wait_sec
+            
+            # 5 saniye boyunca ekranda kalacak hata mesajı
+            error_placeholder = st.empty()
+            error_placeholder.error("⚠️ AI İSTEĞİ SINIR AŞILDI! Lütfen biraz bekleyip tekrar deneyin. (Bu mesaj 5 saniye sonra kaybolacak)")
+            time.sleep(5)
+            error_placeholder.empty()
+        else:
+            # Diğer hatalar için de 5 saniye göster
+            error_placeholder = st.empty()
+            error_placeholder.error(f"❌ AI HATASI: {e}\n\n(Bu mesaj 5 saniye sonra kaybolacak)")
+            time.sleep(5)
+            error_placeholder.empty()
+        return None
+
+
+def generate_free_nodes_with_ai(
+    prompt: str,
+    api_key: str,
+    model: str = "llama-3.3-70b-versatile",
+) -> Optional[List[str]]:
+    """Groq ile 9 adet doğal, bağımsız düğüm etiketi üretir."""
+    if Groq is None:
+        st.error("Groq kütüphanesi yüklü değil. Lütfen `pip install groq` komutunu çalıştırın.")
+        return None
+    if not api_key:
+        st.warning("Lütfen bir Groq API Anahtarı girin.")
+        return None
+
+    client = Groq(api_key=api_key)
+    system_prompt = """
+Sen bir akış şeması içerik yazarı ve grafik tasarımcısın.
+GÖREV: Verilen konu için BAĞIMSIZ 9 adet kutu etiketi üret.
+
+KURALLAR:
+- Tam olarak 9 etiket üret
+- Etiketler doğal ve anlamlı Türkçe olmalı
+- 2-5 kelime arası, fiil + nesne tercih et
+- p1, d1, io1 gibi kısaltmalar KULLANMA
+- Sadece JSON dizi döndür: ["Etiket 1", "Etiket 2", ...]
+- Markdown, açıklama, numara, ekstra metin KULLANMA
+"""
+    def parse_labels_fallback(text: str) -> List[str]:
+        cleaned = text.replace("•", "\n").replace("-", "\n")
+        parts = re.split(r"[\n,;]+", cleaned)
+        out: List[str] = []
+        for p in parts:
+            p = re.sub(r"^\s*\d+[\).\-\s]+", "", p).strip()
+            if p:
+                out.append(p)
+        return out
+
+    try:
+        with st.spinner("🤖 AI bağımsız kutuları düşünüyor..."):
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Konu: {prompt}"}
+                ],
+                temperature=0.3,
+                max_tokens=500,
+            )
+            raw = response.choices[0].message.content.strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            try:
+                labels = json.loads(raw)
+                if isinstance(labels, list):
+                    out = [str(x).strip() for x in labels if str(x).strip()]
+                    if len(out) >= 9:
+                        return out[:9]
+            except Exception:
+                pass
+            fallback = parse_labels_fallback(raw)
+            if len(fallback) >= 9:
+                return fallback[:9]
+            return None
+    except Exception as e:
+        msg = str(e)
+        if "rate limit" in msg.lower() or "rate_limit" in msg.lower():
+            m = re.search(r"in\\s+(\\d+)m(\\d+(?:\\.\\d+)?)s", msg)
+            if m:
+                mins = int(m.group(1))
+                secs = float(m.group(2))
+                wait_sec = int(mins * 60 + secs)
+                st.session_state.ai_rate_limit_until = int(time.time()) + wait_sec
+            st.error("⚠️ AI isteği sınır aşıldı! Lütfen biraz bekleyip tekrar deneyin.")
+        else:
+            st.error(f"❌ AI Hatası: {e}")
+        return None
+
+
+def fallback_free_labels(topic: str, count: int = 9) -> List[str]:
+    base = (topic or "Adım").strip() or "Adım"
+    return [f"{base} - Adım {i + 1}" for i in range(count)]
 
 
 # =============================================================================
@@ -1346,9 +1658,11 @@ def normalize_state(flow_state: StreamlitFlowState) -> None:
                 n.node_type = "default"  # type: ignore[attr-defined]
 
         if hasattr(n, "source_position"):
-            n.source_position = default_src  # type: ignore[attr-defined]
+            if not getattr(n, "source_position", None):
+                n.source_position = default_src  # type: ignore[attr-defined]
         if hasattr(n, "target_position"):
-            n.target_position = default_tgt  # type: ignore[attr-defined]
+            if not getattr(n, "target_position", None):
+                n.target_position = default_tgt  # type: ignore[attr-defined]
 
     for e in flow_state.edges:
         if getattr(e, "label", None) is None:
@@ -1613,7 +1927,10 @@ def parse_mermaid(code_text: str) -> Tuple[Optional[StreamlitFlowState], Optiona
             pass
 
     if not nodes:
-        return None, "Mermaid içinden düğüm bulunamadı. (Desteklenen flowchart sözdizimi: -->, -->|etiket|)", direction
+        return None, (
+            "Mermaid içinden düğüm bulunamadı. (Desteklenen: `A[Metin]`, `B{Karar}`, "
+            "`A --> B`, `A -->|Evet| B`)"
+        ), direction
 
     # Node listesi
     flow_nodes: List[StreamlitFlowNode] = []
@@ -1774,6 +2091,126 @@ def build_graph(flow_state: StreamlitFlowState) -> Tuple[Dict[str, List[Streamli
         out_edges[e.source].append(e)
         in_edges[e.target].append(e)
     return out_edges, in_edges
+
+
+def enforce_connected_flow(flow_state: StreamlitFlowState) -> None:
+    """Akış şemasında bağlantısız (bağımsız) düğüm kalmamasını sağlar."""
+    nodes = flow_state.nodes
+    edges = flow_state.edges
+    if not nodes or len(nodes) == 1:
+        return
+
+    # Hiç edge yoksa, düğümleri sırayla bağla
+    if not edges:
+        new_edges: List[StreamlitFlowEdge] = []
+        for i in range(len(nodes) - 1):
+            src = nodes[i].id
+            tgt = nodes[i + 1].id
+            eid = build_edge_id(src, tgt, "", "solid", salt=str(i))
+            new_edges.append(make_edge(eid, src, tgt, label="", edge_type="smoothstep"))
+        flow_state.edges = new_edges
+        return
+
+    out_edges, in_edges = build_graph(flow_state)
+    start_nodes = [n for n in nodes if is_start_node(n)]
+    if start_nodes:
+        roots = start_nodes
+    else:
+        roots = [n for n in nodes if len(in_edges.get(n.id, [])) == 0]
+        if not roots:
+            roots = [nodes[0]]
+
+    reachable: set[str] = set()
+    q = deque([n.id for n in roots])
+    while q:
+        nid = q.popleft()
+        if nid in reachable:
+            continue
+        reachable.add(nid)
+        for e in out_edges.get(nid, []):
+            q.append(e.target)
+
+    if len(reachable) < len(nodes):
+        flow_state.nodes = [n for n in nodes if n.id in reachable]
+        flow_state.edges = [e for e in edges if e.source in reachable and e.target in reachable]
+
+
+def polish_ai_labels(flow_state: StreamlitFlowState) -> None:
+    """AI etiketlerini daha doğal hale getirir."""
+    for n in flow_state.nodes:
+        kind = get_node_kind(n)
+        label = get_node_label(n)
+        raw = label or ""
+        lowered = raw.lower()
+        if kind == "decision" and any(op in raw for op in ["%", "==", ">=", "<=", ">", "<"]):
+            label = "Koşul sağlandı mı?"
+        elif len(raw.strip()) < 3:
+            label = NODE_KIND.get(kind, NODE_KIND["process"])["default"]
+        elif any(tok in lowered for tok in ["==", "%", ">=", "<=", ">", "<"]):
+            label = raw.replace("%", " mod ").replace("==", " eşit mi ").replace(">=", " en az ").replace("<=", " en fazla ")
+            label = label.replace(">", " büyük mü ").replace("<", " küçük mü ")
+            label = re.sub(r"\s+", " ", label).strip()
+        if label != raw:
+            data = getattr(n, "data", None) or {}
+            data["label"] = label
+            data["content"] = node_markdown(label, kind)
+            n.data = data  # type: ignore[attr-defined]
+
+
+def ensure_decision_edge_labels(flow_state: StreamlitFlowState) -> None:
+    """Karar düğümlerinde ilk 2 dal için Evet/Hayır etiketlerini tamamlar. 3. ve sonrası boş kalır."""
+    out_edges, _ = build_graph(flow_state)
+    for n in flow_state.nodes:
+        if get_node_kind(n) != "decision":
+            continue
+        edges = out_edges.get(n.id, [])
+        if len(edges) < 2:
+            continue
+        
+        # İlk 2 dal için Evet/Hayır kontrolü
+        labels = [get_edge_label(e).strip().lower() for e in edges[:2]]
+        
+        if not any(lbl for lbl in labels):
+            # Her iki etiket de boşsa
+            edges[0].label = "Evet"  # type: ignore[attr-defined]
+            edges[1].label = "Hayır"  # type: ignore[attr-defined]
+        else:
+            # Sadece eksik olanı ekle
+            if not any("evet" in lbl for lbl in labels):
+                edges[0].label = "Evet"  # type: ignore[attr-defined]
+            if len(edges) >= 2 and not any("hayır" in lbl or "hayir" in lbl for lbl in labels):
+                edges[1].label = "Hayır"  # type: ignore[attr-defined]
+        
+        # 3. ve sonraki dallar için etiket ekleme (boş bırak)
+        # Kullanıcı isterse manuel ekleyebilir
+
+
+def build_required_flow_template(topic: str) -> str:
+    """Zorunlu düğüm tiplerini içeren güvenli akış şeması üretir."""
+    topic = (topic or "Akış").strip()
+    return f"""flowchart TD
+    s([Başla: {topic}])
+    io1[/Giriş Bilgisi Al/]
+    p1[Hazırlık Yap]
+    d1{{Koşul Sağlandı mı?}}
+    l1{{Tekrar Gerekli mi?}}:::loop
+    p2[Adımı Uygula]
+    fn1[[Fonksiyon Çağır]]:::function
+    c1((Bağlantı))
+    n1[Not: Kontrol Noktası]:::comment
+    e([Bitir: Tamamlandı])
+    
+    s --> io1
+    io1 --> p1
+    p1 --> d1
+    d1 -->|Evet| p2
+    d1 -->|Hayır| l1
+    l1 --> p2
+    p2 --> fn1
+    fn1 --> c1
+    c1 --> n1
+    n1 --> e
+""".strip()
 
 
 def detect_cycle(nodes: Iterable[StreamlitFlowNode], out_edges: Dict[str, List[StreamlitFlowEdge]]) -> bool:
@@ -2052,7 +2489,8 @@ def export_png_via_kroki(code: str, scale: int = 1) -> bytes:
             "Kurulum: pip install requests"
         )
     try:
-        url = "https://kroki.io/mermaid/png"
+        scale = max(1, min(4, int(scale)))
+        url = f"https://kroki.io/mermaid/png?scale={scale}"
         r = requests.post(
             url,
             data=code.encode("utf-8"),
@@ -2361,6 +2799,8 @@ section[data-testid="stSidebar"] h3 {
   margin-bottom: 0.25rem;
 }
 section[data-testid="stSidebar"] .stMarkdown { margin-bottom: 0.25rem; }
+section[data-testid="stSidebar"] .stExpander { margin-top: 0.2rem; margin-bottom: 0.2rem; }
+section[data-testid="stSidebar"] .stButton { margin-top: 0.1rem; margin-bottom: 0.1rem; }
 div[data-testid="stAppViewContainer"] > .main .block-container { 
   padding-top: 0rem;
   padding-bottom: 0.5rem;
@@ -2505,16 +2945,16 @@ div[data-testid="stHorizontalBlock"]:has(button[aria-label*="Bitir"]) {
 .stButton > button[aria-label*="Fonksiyon"] { background: #EDE9FE !important; border-color: #6D28D9 !important; color: #4C1D95 !important; }
 .stButton > button[aria-label*="Seçiliyi Sil"] { background: #FEE2E2 !important; border-color: #EF4444 !important; color: #991B1B !important; }
 
-/* Geri/?leri renk */
+/* Geri/İleri renk */
 .stButton > button[aria-label*="Geri"],
-.stButton > button[aria-label*="?leri"] {
+.stButton > button[aria-label*="İleri"] {
   background: #E0F2FE !important;
   border-color: #38BDF8 !important;
   color: #0C4A6E !important;
 }
 
-/* S?f?rla rengi */
-.stButton > button[aria-label*="S?f?rla"] {
+/* Sıfırla rengi */
+.stButton > button[aria-label*="Sıfırla"] {
   background: #FEF3C7 !important;
   border-color: #F59E0B !important;
   color: #92400E !important;
@@ -2689,19 +3129,29 @@ def inject_tr_translation_script() -> None:
 
   const normalizeKey = (t) => {
     if (!t) return "";
-    return t.replace(/^[^A-Za-z]+/, "").trim().toLowerCase();
+    return t.replace(/^[^A-Za-z]+/, "").replace(/[^A-Za-z]+$/, "").trim().toLowerCase();
+  };
+
+  const findMapping = (text) => {
+    if (!text) return "";
+    if (map[text]) return map[text];
+    const lower = text.toLowerCase();
+    if (mapLower[lower]) return mapLower[lower];
+    const nk = normalizeKey(text);
+    if (mapLower[nk]) return mapLower[nk];
+    // içeriyor mu?
+    for (const k of Object.keys(mapLower)) {
+      if (lower.includes(k)) return mapLower[k];
+    }
+    return "";
   };
 
   const replaceText = (node) => {
     if (!node) return;
     if (node.nodeType === Node.TEXT_NODE) {
       const t = (node.textContent || "").trim();
-      if (map[t]) node.textContent = map[t];
-      else if (mapLower[t.toLowerCase()]) node.textContent = mapLower[t.toLowerCase()];
-      else {
-        const nk = normalizeKey(t);
-        if (mapLower[nk]) node.textContent = mapLower[nk];
-      }
+      const mapped = findMapping(t);
+      if (mapped) node.textContent = mapped;
     } else if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
       if (node.childNodes && node.childNodes.length) {
         node.childNodes.forEach(replaceText);
@@ -2709,11 +3159,9 @@ def inject_tr_translation_script() -> None:
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       ["aria-label", "title", "placeholder"].forEach((attr) => {
         const v = node.getAttribute && node.getAttribute(attr);
-        if (v && map[v]) node.setAttribute(attr, map[v]);
-        else if (v && mapLower[v.toLowerCase()]) node.setAttribute(attr, mapLower[v.toLowerCase()]);
-        else if (v) {
-          const nk = normalizeKey(v);
-          if (mapLower[nk]) node.setAttribute(attr, mapLower[nk]);
+        if (v) {
+          const mapped = findMapping(v);
+          if (mapped) node.setAttribute(attr, mapped);
         }
       });
       if (node.shadowRoot) {
@@ -2832,7 +3280,6 @@ def inject_selection_helper_script() -> None:
       const target = e && e.target ? e.target : null;
       if (isControlArea(target)) return;
       const node = target && target.closest ? target.closest(".react-flow__node") : null;
-      const edge = target && target.closest ? target.closest(".react-flow__edge") : null;
       const pane = target && target.closest ? target.closest(".react-flow__pane") : null;
       if (node) {
         const selected = doc.querySelectorAll(".react-flow__node.manual-selected");
@@ -2840,10 +3287,6 @@ def inject_selection_helper_script() -> None:
         node.classList.add("manual-selected");
         const nodeId = node.getAttribute("data-id") || (node.dataset ? node.dataset.id : "");
         if (nodeId) setHiddenValue(nodeId);
-        return;
-      }
-      if (edge) {
-        clearSelection();
         return;
       }
       if (pane || isInsideFlow(target)) {
@@ -2997,6 +3440,42 @@ def initialize_state() -> None:
     if "recovery_shown" not in st.session_state:
         st.session_state.recovery_shown = False
 
+    if "groq_api_key" not in st.session_state:
+        st.session_state.groq_api_key = ""
+
+    if not st.session_state.groq_api_key:
+        env_key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_APIKEY")
+        secret_key = None
+        try:
+            secret_key = st.secrets.get("GROQ_API_KEY")  # type: ignore[attr-defined]
+        except Exception:
+            secret_key = None
+        if secret_key:
+            st.session_state.groq_api_key = str(secret_key)
+        elif env_key:
+            st.session_state.groq_api_key = str(env_key)
+
+    if "ai_model" not in st.session_state:
+        st.session_state.ai_model = "llama-3.3-70b-versatile"
+
+    if "ai_mode" not in st.session_state:
+        st.session_state.ai_mode = "Akış Şeması"
+        autosave = load_autosave()
+        if autosave and autosave.get("ai_mode"):
+            st.session_state.ai_mode = str(autosave.get("ai_mode"))
+
+    # Eski değerleri yeni etiketlere dönüştür
+    if st.session_state.ai_mode == "Şema (Oklu)":
+        st.session_state.ai_mode = "Akış Şeması"
+    elif st.session_state.ai_mode == "Serbest (Bağımsız)":
+        st.session_state.ai_mode = "Bağımsız Düğümler"
+
+    if "ai_rate_limit_until" not in st.session_state:
+        st.session_state.ai_rate_limit_until = 0
+
+    if "ai_prompt_text" not in st.session_state:
+        st.session_state.ai_prompt_text = ""
+
     # UI toggles
     if "show_code" not in st.session_state:
         st.session_state.show_code = True
@@ -3009,6 +3488,9 @@ def initialize_state() -> None:
 
     if "enable_context_menus" not in st.session_state:
         st.session_state.enable_context_menus = True
+
+    if "show_grid" not in st.session_state:
+        st.session_state.show_grid = True
 
     if "node_spacing" not in st.session_state:
         st.session_state.node_spacing = 70
@@ -3051,6 +3533,12 @@ def initialize_state() -> None:
 
     if "auto_connect_fired" not in st.session_state:
         st.session_state.auto_connect_fired = False
+
+    if "auto_connect_anchor" not in st.session_state:
+        st.session_state.auto_connect_anchor = None
+
+    if "auto_connect_anchor" not in st.session_state:
+        st.session_state.auto_connect_anchor = None
 
     if "pending_edge_id" not in st.session_state:
         st.session_state.pending_edge_id = None
@@ -3171,6 +3659,7 @@ def apply_js_selection() -> None:
 
 
 def update_selection_from_state(flow_state: StreamlitFlowState) -> None:
+    """Flow state'teki seçimi hızlıca session state'e aktar."""
     if st.session_state.get("force_clear_selection"):
         st.session_state.force_clear_selection = False
         st.session_state.selected_node_id = None
@@ -3182,21 +3671,25 @@ def update_selection_from_state(flow_state: StreamlitFlowState) -> None:
             except Exception:
                 pass
         return
-    if st.session_state.get("js_selection_changed"):
-        st.session_state.js_selection_changed = False
-        return
+    
+    # Flow state'ten seçimi direkt al
     selected_id = getattr(flow_state, "selected_id", None)
-    node_ids = {n.id for n in flow_state.nodes}
-    edge_ids = {e.id for e in flow_state.edges}
     if not selected_id:
         return
+    
+    node_ids = {n.id for n in flow_state.nodes}
+    edge_ids = {e.id for e in flow_state.edges}
+    
+    # Hızlı seçim - tek tıkla çalışsın
     if selected_id in node_ids:
-        st.session_state.selected_node_id = selected_id
-        st.session_state.selected_edge_id = None
-        st.session_state.last_active_node_id = selected_id
+        if st.session_state.selected_node_id != selected_id:
+            st.session_state.selected_node_id = selected_id
+            st.session_state.selected_edge_id = None
+            st.session_state.last_active_node_id = selected_id
     elif selected_id in edge_ids:
-        st.session_state.selected_edge_id = selected_id
-        st.session_state.selected_node_id = None
+        if st.session_state.selected_edge_id != selected_id:
+            st.session_state.selected_edge_id = selected_id
+            st.session_state.selected_node_id = None
 
 
 def next_node_id() -> str:
@@ -3270,13 +3763,22 @@ def add_node(kind: str, label_override: Optional[str] = None, connect_from: Opti
 
     nid = next_node_id()
 
-    # Konum: seçili düğümün sağına; seçili yoksa boş alana
+    # Konum: seçili düğümün altına; seçili yoksa boş alana
     pos = next_free_position()
     if connect_from:
         src_node = find_node(connect_from)
         if src_node is not None:
             x, y = get_node_pos(src_node)
-            pos = (x + 260.0, y + 0.0)
+            spacing_y = 160.0
+            placed = False
+            for i in range(6):
+                candidate = (x, y + spacing_y * (i + 1))
+                if is_position_free(candidate, st.session_state.flow_state.nodes):
+                    pos = candidate
+                    placed = True
+                    break
+            if not placed:
+                pos = next_free_position()
 
     new_node = make_node(nid, label, kind, pos=pos)
     st.session_state.flow_state.nodes.append(new_node)
@@ -3285,7 +3787,28 @@ def add_node(kind: str, label_override: Optional[str] = None, connect_from: Opti
     src_id = connect_from
     if src_id and src_id != nid:
         eid = next_edge_id(src_id, nid)
-        st.session_state.flow_state.edges.append(make_edge(eid, src_id, nid, label="", edge_type="smoothstep"))
+        label = ""
+        src_node = find_node(src_id)
+        if src_node is not None and get_node_kind(src_node) == "decision":
+            # Karar düğümünden çıkan mevcut bağlantıları say
+            existing_edges = [e for e in st.session_state.flow_state.edges if e.source == src_id]
+            existing_labels = [get_edge_label(e).lower() for e in existing_edges]
+            
+            # İlk dal: "Evet", İkinci dal: "Hayır", 3. ve sonrası: boş
+            if len(existing_edges) == 0:
+                label = "Evet"
+            elif len(existing_edges) == 1:
+                # Eğer ilk dalda zaten "Evet" varsa ikinci dal "Hayır", yoksa kontrol et
+                if any("evet" in lbl for lbl in existing_labels):
+                    label = "Hayır"
+                else:
+                    # İlk dal "Evet" değilse, ikinci dala da "Hayır" yazma, boş bırak
+                    label = ""
+            else:
+                # 3. ve sonraki dallar için etiket yok (boş)
+                label = ""
+        
+        st.session_state.flow_state.edges.append(make_edge(eid, src_id, nid, label=label, edge_type="smoothstep"))
 
     st.session_state.last_active_node_id = nid
 
@@ -3328,6 +3851,8 @@ def delete_node(node_id: str) -> None:
     st.session_state.flow_state.edges = [e for e in edges if e.source != node_id and e.target != node_id]
     if st.session_state.last_active_node_id == node_id:
         st.session_state.last_active_node_id = None
+    if st.session_state.get("auto_connect_anchor") == node_id:
+        st.session_state.auto_connect_anchor = None
     normalize_state(st.session_state.flow_state)
     sync_code_text(generate_mermaid(st.session_state.flow_state, st.session_state.direction))
     st.session_state.history.push(st.session_state.code_text, st.session_state.flow_state, action="delete_node")
@@ -3420,6 +3945,8 @@ def update_node(
         n.target_position = target_position  # type: ignore[attr-defined]
 
     normalize_state(st.session_state.flow_state)
+    if st.session_state.get("layout_mode") == "Otomatik (Ağaç)":
+        st.session_state.force_layout_reset = True
     sync_code_text(generate_mermaid(st.session_state.flow_state, st.session_state.direction))
     st.session_state.history.push(st.session_state.code_text, st.session_state.flow_state, action="update_node")
 
@@ -3532,6 +4059,143 @@ def render_view_mode_panel(container: st.delta_generator.DeltaGenerator) -> None
         st.rerun()
 
 
+def render_ai_panel(container: st.delta_generator.DeltaGenerator) -> None:
+    """Sidebar'da AI Asistanı panelini gösterir."""
+    with container.expander("✨ AI Asistanı (Metinden Şemaya)", expanded=True):
+        st.caption("🚀 Groq ile gerçekçi akış şeması üretimi")
+        st.caption("Model: llama-3.3-70b-versatile")
+        container.info(
+            "Akış Şeması: Oklarla bağlı, zorunlu tipleri içeren tam akış üretir.\n"
+            "Bağımsız Düğümler: Sadece kutular üretir, ok çizmez.",
+            icon="ℹ️",
+        )
+        
+        # API Key Talimatları - Belirgin bir şekilde
+        st.markdown("""
+        <div style="background: #FFF3CD; padding: 12px; border-radius: 8px; border-left: 4px solid #FFC107; margin-bottom: 12px;">
+            <strong>📌 API Anahtarı Nasıl Alınır?</strong><br>
+            1️⃣ <a href="https://console.groq.com/keys" target="_blank" style="color: #0066CC; font-weight: bold;">console.groq.com/keys</a> adresine git<br>
+            2️⃣ <strong>"API Anahtarı Oluştur"</strong> butonuna tıkla<br>
+            3️⃣ İsim alanını boş bırakabilirsin<br>
+            4️⃣ <strong>"Onayla"</strong> butonuna tıkla<br>
+            5️⃣ Gelen <code>gsk_</code> ile başlayan anahtarı kopyala ve aşağıya yapıştır
+        </div>
+        """, unsafe_allow_html=True)
+        
+        api_key = st.text_input(
+            "Groq API Key (gsk_ ile başlar)", 
+            value=st.session_state.groq_api_key, 
+            type="password",
+            placeholder="gsk_...",
+            help="Yukarıdaki adımları takip ederek API anahtarınızı alın"
+        )
+        st.session_state.groq_api_key = api_key
+
+        prompt = st.text_area(
+            "Akış Tanımı", 
+            placeholder="Örn: okula gidiş, kahvaltı hazırlama, ATM para çekme...", 
+            height=100,
+            help="Ne yapılacağını kısaca yazın. AI gerçekçi bir akış şeması oluşturacak.",
+            key="ai_prompt_text",
+        )
+        prompt = st.session_state.ai_prompt_text
+        
+        with container.expander("🧩 İdeal Tanım Şablonu", expanded=False):
+            template = (
+                "Konu: (kısaca yaz)\n"
+                "Amaç: (ne elde edilecek)\n"
+                "Girişler: (veri/olay)\n"
+                "Çıkışlar: (sonuç)\n"
+                "Kararlar: (evet/hayır)\n"
+                "Döngü: (tekrar eden adım)\n"
+                "Notlar: (özel şartlar)"
+            )
+            container.code(template, language="text")
+            col_t1, col_t2 = container.columns(2)
+            with col_t1:
+                if col_t1.button("Şablonu Yapıştır", use_container_width=True, key="paste_prompt_template"):
+                    st.session_state.ai_prompt_text = template
+                    st.rerun()
+            with col_t2:
+                sample = (
+                    "Konu: Okula gidiş\n"
+                    "Amaç: Okula zamanında varmak\n"
+                    "Girişler: Alarm çaldı\n"
+                    "Çıkışlar: Okula varıldı\n"
+                    "Kararlar: Servis var mı?\n"
+                    "Döngü: Servis yoksa yürüyüşe geç\n"
+                    "Notlar: Kahvaltı sonrası hazırlan"
+                )
+                if col_t2.button("Örnek Doldur", use_container_width=True, key="fill_prompt_sample"):
+                    st.session_state.ai_prompt_text = sample
+                    st.rerun()
+        
+        mode_options = ["Akış Şeması", "Bağımsız Düğümler"]
+        ai_mode = st.radio(
+            "Oluşturma Modu",
+            mode_options,
+            index=mode_options.index(st.session_state.ai_mode) if st.session_state.ai_mode in mode_options else 0,
+            horizontal=True,
+        )
+        st.session_state.ai_mode = ai_mode
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("⚡ AI Üret", use_container_width=True, type="primary"):
+                if not prompt.strip():
+                    toast_warning("Lütfen bir tanım girin.")
+                elif not api_key.strip():
+                    toast_warning("Lütfen Groq API Key girin.")
+                else:
+                    now = int(time.time())
+                    limit_until = int(st.session_state.get("ai_rate_limit_until", 0) or 0)
+                    if now < limit_until:
+                        toast_warning(f"Limit nedeniyle bekleyin: {limit_until - now} sn")
+                        return
+                    if st.session_state.ai_mode == "Bağımsız Düğümler":
+                        labels = generate_free_nodes_with_ai(prompt, api_key, "llama-3.3-70b-versatile")
+                        if labels:
+                            apply_free_nodes(labels, name="AI Serbest")
+                        else:
+                            apply_free_nodes(fallback_free_labels(prompt), name="Serbest (Şablon)")
+                    else:
+                        # Akış Şeması Modu
+                        with st.spinner("🤖 AI akış şeması oluşturuyor..."):
+                            mermaid_code = generate_flow_with_ai(prompt, api_key, "llama-3.3-70b-versatile")
+                        
+                        if mermaid_code:
+                            # Şemayı uygula ve ekrana yansıt
+                            apply_ai_flow_template(mermaid_code, prompt, name="AI Akış Şeması")
+                        else:
+                            # Rate limit veya boş yanıt durumunda güvenli şema uygula
+                            fallback = build_required_flow_template(prompt)
+                            apply_ai_flow_template(fallback, prompt, name="Akış Şeması (Şablon)")
+        
+        with col2:
+            if st.button("🗑️ Tümünü Temizle", use_container_width=True, help="Tüm düğümleri siler, sıfırdan başlar"):
+                # Tek başlangıç düğümü ile temiz başlangıç
+                empty_code = """flowchart TD
+    start([Başla])
+""".strip()
+                # Direkt state'i sıfırla
+                st.session_state.flow_state = make_flow_state(
+                    [make_node("start", "Başla", "terminal", pos=(250, 100))],
+                    []
+                )
+                st.session_state.code_text = empty_code
+                st.session_state.direction = "TD"
+                st.session_state.node_counter = 1
+                st.session_state.edge_counter = 1
+                st.session_state.selected_node_id = None
+                st.session_state.selected_edge_id = None
+                st.session_state.history = HistoryManager()
+                st.session_state.history.push(empty_code, st.session_state.flow_state, action="clear")
+                st.session_state.last_graph_hash = graph_hash(st.session_state.flow_state)
+                st.session_state.last_code_hash = text_hash(empty_code)
+                toast_success("✨ Tüm düğümler temizlendi!")
+                st.rerun()
+
+
 def render_quick_export_panel(container: st.delta_generator.DeltaGenerator) -> None:
     container.markdown("### 📤 Dışa Aktar")
     allowed = st.session_state.get("allowed_exports", ["Mermaid", "PNG", "SVG", "JSON", "PDF"])
@@ -3552,9 +4216,15 @@ def render_quick_export_panel(container: st.delta_generator.DeltaGenerator) -> N
     if quick_format == "PDF" and canvas is None:
         container.info("PDF için `reportlab` gerekli. Kurulum: `pip install reportlab`")
 
+    can_prepare = True
+    if quick_format in ("PNG", "SVG", "PDF") and requests is None:
+        can_prepare = False
+    if quick_format == "PDF" and canvas is None:
+        can_prepare = False
+
     col_a, col_b = container.columns([1, 1])
     with col_a:
-        if st.button("Hazırla", use_container_width=True, key="quick_export_prepare_sidebar"):
+        if st.button("Hazırla", use_container_width=True, key="quick_export_prepare_sidebar", disabled=not can_prepare):
             try:
                 st.session_state.quick_export_error = None
                 latest_code = refresh_code_from_state()
@@ -3644,7 +4314,10 @@ def render_settings_panel(container: st.delta_generator.DeltaGenerator) -> None:
     if layout_mode != st.session_state.layout_mode:
         st.session_state.layout_mode = layout_mode
 
-    container.toggle("Tıkla‑Bağla (otomatik)", key="auto_connect")
+    auto_connect = container.toggle("Tıkla‑Bağla (otomatik)", key="auto_connect")
+    if not auto_connect:
+        st.session_state.auto_connect_anchor = None
+    container.toggle("Izgara görünümü", key="show_grid")
     container.toggle(
         "Izgara hizalama",
         key="enable_grid_snap",
@@ -3652,10 +4325,22 @@ def render_settings_panel(container: st.delta_generator.DeltaGenerator) -> None:
     )
     container.slider("Düğüm aralığı", 40, 120, key="node_spacing")
 
+    # Grid görünümünü anlık kontrol et
+    if not st.session_state.get("show_grid", True):
+        container.markdown(
+            "<style>.react-flow__pane{background:none !important;}</style>",
+            unsafe_allow_html=True,
+        )
+
 
 def render_help_panel(container: st.delta_generator.DeltaGenerator) -> None:
     container.subheader("📚 Kılavuz")
     container.caption("Akış şeması düğümleri ve arayüz kullanımı.")
+
+    container.info(
+        "Hızlı Başlangıç: 1) Başla düğümünü seç. 2) Üst paletten adımları ekle. "
+        "3) Karar düğümünde Evet/Hayır etiketlerini kontrol et."
+    )
 
     exp_nodes = container.expander("🔷 Düğüm Tipleri ve Kullanımları", expanded=True)
     exp_nodes.markdown(
@@ -3666,41 +4351,41 @@ def render_help_panel(container: st.delta_generator.DeltaGenerator) -> None:
 • Her akış şeması <strong>bir Başla</strong> ile başlar, <strong>bir veya daha fazla Bitir</strong> ile sona erer.<br/>
 • Örnek: "Başla" → algoritmanın ilk adımı<br/>
 <br/>
-<strong>📥 Giriş/Çıkış (Input/Output)</strong><br/>
+<strong>📥 Giriş/Çıkış</strong><br/>
 • Kullanıcıdan veri almak veya ekrana sonuç yazdırmak için kullanılır.<br/>
 • Giriş: "sayı oku", "isim al"<br/>
 • Çıkış: "sonucu yaz", "mesaj göster"<br/>
 <br/>
-<strong>⚙️ İşlem (Process)</strong><br/>
+<strong>⚙️ İşlem</strong><br/>
 • Hesaplama, atama, matematiksel işlemler için kullanılır.<br/>
 • Örnek: "toplam = a + b", "sayac = sayac + 1", "sonuç = x * 2"<br/>
 <br/>
-<strong>❓ Karar (Decision)</strong><br/>
+<strong>❓ Karar</strong><br/>
 • Koşullu durumlar için kullanılır (eğer/değilse).<br/>
 • Baklava şeklinde gösterilir, iki çıkışı vardır: Evet/Hayır veya Doğru/Yanlış<br/>
 • Örnek: "sayı > 0 ?", "not >= 50 ?", "şifre doğru mu?"<br/>
 <br/>
-<strong>🔁 Döngü (Loop)</strong><br/>
+<strong>🔁 Döngü</strong><br/>
 • Tekrarlayan işlemler için kullanılır.<br/>
 • Örnek: "i = 1'den 10'a kadar", "sayac < 100 olduğu sürece"<br/>
 <br/>
-<strong>🔧 Alt Süreç (Subprocess)</strong><br/>
+<strong>🔧 Alt Süreç</strong><br/>
 • Fonksiyon çağrısı veya alt algoritma için kullanılır.<br/>
 • Örnek: "faktöriyel_hesapla()", "asal_kontrol()"<br/>
 <br/>
-<strong>💾 Veritabanı (Database)</strong><br/>
+<strong>💾 Veritabanı</strong><br/>
 • Veri saklama veya veri tabanı işlemleri için kullanılır.<br/>
 • Örnek: "veritabanına kaydet", "kayıtları oku"<br/>
 <br/>
-<strong>🔗 Bağlantı (Connector)</strong><br/>
+<strong>🔗 Bağlantı</strong><br/>
 • Sayfa geçişleri veya uzak bağlantılar için kullanılır.<br/>
 • Karmaşık akışlarda şemayı düzenli tutmaya yarar.<br/>
 <br/>
-<strong>📝 Not (Comment)</strong><br/>
+<strong>📝 Not</strong><br/>
 • Açıklama veya not eklemek için kullanılır.<br/>
 • Algoritmanın mantığını açıklamak için faydalıdır.<br/>
 <br/>
-<strong>💡 Fonksiyon (Function)</strong><br/>
+<strong>💡 Fonksiyon</strong><br/>
 • Özel fonksiyon tanımları için kullanılır.<br/>
 • Örnek: "hesapla(x, y)", "doğrula(şifre)"<br/>
 </div>
@@ -3764,14 +4449,7 @@ def render_sidebar() -> None:
     with st.sidebar:
         render_header_bar()
         st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
-        st.markdown(
-            '<a class="suggest-btn" href="https://forms.gle/mocinVKKF2LHAQbY8" target="_blank" rel="noopener">📝 Öneri Gönder</a>',
-            unsafe_allow_html=True,
-        )
-        st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
         render_view_mode_panel(st)
-        st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
-        render_quick_export_panel(st)
         st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
         is_basic = st.session_state.get("user_mode", DEFAULT_MODE) == "Basit"
 
@@ -3846,6 +4524,9 @@ def render_sidebar() -> None:
                     if st.button("Şablonu Uygula", use_container_width=True):
                         apply_template(TEMPLATES[tmpl_name]["code"], name=tmpl_name)
 
+        st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
+        render_ai_panel(st)
+        st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
         if not is_basic:
             with st.expander("🧰 Araçlar", expanded=False):
                 st.toggle("Otomatik doğrula", key="auto_validate")
@@ -3865,12 +4546,26 @@ def render_sidebar() -> None:
             with st.expander("✅ Kontrol / Hata Bul", expanded=False):
                 render_control_panel(st, compact=True)
 
+        st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
+        render_quick_export_panel(st)
+
+        st.markdown('<div class="section-sep"></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<a class="suggest-btn" href="https://forms.gle/mocinVKKF2LHAQbY8" target="_blank" rel="noopener">📝 Öneri Gönder</a>',
+            unsafe_allow_html=True,
+        )
+
+
 
 def apply_template(code: str, name: str = "Şablon") -> None:
-    code = (code or "").strip() or DEFAULT_CODE
+    code = (code or "").strip()
+    if not code:
+        # Eğer kod boşsa, varsayılan kodu kullan
+        code = DEFAULT_CODE
+    
     parsed_state, error, direction = parse_mermaid(code)
     if error or parsed_state is None:
-        st.error(f"Şablon uygulanamadı: {error}")
+        toast_error(f"Şablon uygulanamadı: {error or 'Bilinmeyen hata'}")
         return
 
     st.session_state.flow_state = parsed_state
@@ -3879,6 +4574,93 @@ def apply_template(code: str, name: str = "Şablon") -> None:
     sync_counters_from_state(st.session_state.flow_state)
     sync_code_text(code)
     st.session_state.task_check_fired = False
+    st.session_state.selected_node_id = None
+    st.session_state.selected_edge_id = None
+    st.session_state.auto_connect_anchor = None
+    st.session_state.auto_connect_anchor = None
+
+    st.session_state.history.push(st.session_state.code_text, st.session_state.flow_state, action=f"load({name})")
+    st.session_state.last_graph_hash = graph_hash(st.session_state.flow_state)
+    toast_success(f"'{name}' yüklendi")
+    st.rerun()
+
+
+def apply_ai_flow_template(code: str, topic: str, name: str = "AI Şema") -> None:
+    """AI şema çıktısını uygular, bağlantısız düğümleri temizler ve ekrana yansıtır."""
+    code = (code or "").strip()
+    
+    if not code:
+        toast_error("AI boş kod üretti. Lütfen farklı bir tanım deneyin.")
+        return
+
+    # AI çıktısını parse et
+    parsed_state, error, direction = parse_mermaid(code)
+    
+    if error or parsed_state is None:
+        toast_error(f"AI çıktısı işlenemedi: {error or 'Geçersiz Mermaid kodu'}. Lütfen tekrar deneyin.")
+        return
+
+    # Bağlantısız düğümleri temizle
+    enforce_connected_flow(parsed_state)
+    
+    # En az 3 düğüm olmalı (başla, en az 1 işlem, bitir)
+    if len(parsed_state.nodes) < 3:
+        toast_error(f"Çok az düğüm ({len(parsed_state.nodes)}). En az 3 düğüm gerekli. Lütfen daha detaylı bir tanım yazın.")
+        return
+
+    # Etiketleri temizle ve düzelt
+    polish_ai_labels(parsed_state)
+    ensure_decision_edge_labels(parsed_state)
+
+    # State'i güncelle - ekrana yansıt
+    st.session_state.flow_state = parsed_state
+    st.session_state.direction = direction
+    normalize_state(st.session_state.flow_state)
+    sync_counters_from_state(st.session_state.flow_state)
+    sync_code_text(generate_mermaid(st.session_state.flow_state, st.session_state.direction))
+    st.session_state.task_check_fired = False
+    st.session_state.selected_node_id = None
+    st.session_state.selected_edge_id = None
+    st.session_state.auto_connect_anchor = None
+    st.session_state.auto_connect_anchor = None
+
+    # Tarihe ekle
+    st.session_state.history.push(st.session_state.code_text, st.session_state.flow_state, action=f"load({name})")
+    st.session_state.last_graph_hash = graph_hash(st.session_state.flow_state)
+    
+    # Başarı mesajı
+    toast_success(f"✨ {name} oluşturuldu: {len(parsed_state.nodes)} düğüm, {len(parsed_state.edges)} bağlantı")
+    st.rerun()
+
+
+def apply_free_nodes(labels: List[str], name: str = "Serbest") -> None:
+    """Bağımsız 9 kutu oluşturur (ok yok)."""
+    labels = [l.strip() for l in labels if l and l.strip()]
+    if not labels:
+        toast_error("Serbest mod için etiket üretilemedi.")
+        return
+    # 3x3 grid yerleşim
+    nodes: List[StreamlitFlowNode] = []
+    spacing_x = 260.0
+    spacing_y = 160.0
+    cols = 3
+    for idx, label in enumerate(labels[:9], start=1):
+        row = (idx - 1) // cols
+        col = (idx - 1) % cols
+        pos = (col * spacing_x, row * spacing_y)
+        nid = f"n{idx}"
+        nodes.append(make_node(nid, label, "process", pos=pos))
+
+    st.session_state.flow_state = make_flow_state(nodes, [])
+    st.session_state.direction = "TD"
+    normalize_state(st.session_state.flow_state)
+    sync_counters_from_state(st.session_state.flow_state)
+    sync_code_text(generate_mermaid(st.session_state.flow_state, st.session_state.direction))
+    st.session_state.task_check_fired = False
+    st.session_state.selected_node_id = None
+    st.session_state.selected_edge_id = None
+    st.session_state.auto_connect_anchor = None
+    st.session_state.auto_connect_anchor = None
 
     st.session_state.history.push(st.session_state.code_text, st.session_state.flow_state, action=f"load({name})")
     st.session_state.last_graph_hash = graph_hash(st.session_state.flow_state)
@@ -3898,19 +4680,6 @@ def render_node_panel(container: st.delta_generator.DeltaGenerator) -> None:
 
     nodes = st.session_state.flow_state.nodes
     node_ids = [n.id for n in nodes]
-
-    if st.session_state.selected_node_id:
-        node = find_node(st.session_state.selected_node_id)
-        if node is not None:
-            if st.session_state.last_quick_node_id != st.session_state.selected_node_id:
-                st.session_state.quick_node_label = get_node_label(node)
-                st.session_state.last_quick_node_id = st.session_state.selected_node_id
-            container.text_input(
-                "⚡ Düğüm Metni (Hızlı)",
-                key="quick_node_label",
-                help="Enter ile hızlı güncelle",
-                on_change=apply_quick_node_label,
-            )
 
     if not node_ids:
         container.info("Henüz düğüm yok. Üstteki paletten düğüm ekleyin.")
@@ -4296,6 +5065,17 @@ def render_toolbar(container: st.delta_generator.DeltaGenerator) -> None:
     """
     history: HistoryManager = st.session_state.history
 
+    # Kullanıcıya dönen kısa ipuçları (15 sn'de bir)
+    try:
+        st_autorefresh = getattr(st, "autorefresh", None) or getattr(st, "st_autorefresh", None)
+        if st_autorefresh:
+            st_autorefresh(interval=15000, key="tip_autorefresh")
+    except Exception:
+        pass
+    tip_idx = int(time.time() // 15) % max(1, len(TIPS))
+    tip = TIPS[tip_idx] if TIPS else "İpucu bulunamadı."
+    container.info(f"💡 **Nasıl kullanılır:** {tip}", icon="ℹ️")
+
     allowed = st.session_state.get("allowed_palette", list(NODE_KIND.keys()))
     controls = container.columns([1, 1, 1, 1], gap="small")
 
@@ -4332,9 +5112,16 @@ def render_toolbar(container: st.delta_generator.DeltaGenerator) -> None:
                 st.rerun()
     
     with controls[2]:
-        if st.button("🔄 Sıfırla", use_container_width=True, help="Düzeni yeniden yerleştir"):
+        if st.button("🔄 Yeni Şemaya Geç", use_container_width=True, help="Seçimi iptal et, yeni şema başlat"):
+            # Seçili düğümü iptal et
+            st.session_state.selected_node_id = None
+            st.session_state.selected_edge_id = None
+            st.session_state.last_active_node_id = None
+            st.session_state.force_clear_selection = True
+            st.session_state.auto_connect_anchor = None
+            # Düzeni sıfırla
             st.session_state.force_layout_reset = True
-            toast_info("Düzen sıfırlanıyor...")
+            toast_success("✨ Seçim iptal edildi! Artık yeni düğümler bağımsız eklenecek.")
             st.rerun()
 
     with controls[3]:
@@ -4342,14 +5129,16 @@ def render_toolbar(container: st.delta_generator.DeltaGenerator) -> None:
             delete_selected()
 
     def add_from_palette(kind: str, label: Optional[str] = None) -> None:
-        # Eğer bir düğüm seçili ise, yeni düğümü ona bağla
-        # Hiçbir düğüm seçili değilse (boşluk tıklandıysa), bağımsız düğüm oluştur
-        connect_from = st.session_state.get("selected_node_id")
+        # Eğer otomatik bağla açıksa ve bir düğüm seçiliyse, yeni düğümü ona bağla
+        # Aksi halde bağımsız düğüm oluştur
+        connect_from = None
+        if st.session_state.get("auto_connect"):
+            selected = st.session_state.get("selected_node_id")
+            if selected and find_node(selected) is not None:
+                connect_from = selected
         if connect_from and find_node(connect_from) is not None:
             # Seçili düğüm varsa, ona bağla
             add_node(kind, label_override=label, connect_from=connect_from)
-            st.session_state.selected_node_id = connect_from
-            st.session_state.selected_edge_id = None
         else:
             # Seçili düğüm yoksa, bağımsız oluştur
             add_node(kind, label_override=label, connect_from=None)
@@ -4419,7 +5208,7 @@ def main() -> None:
         on_change=apply_js_selection,
     )
 
-    show_right_panel = True
+    show_right_panel = st.session_state.get("user_mode", DEFAULT_MODE) != "Basit"
 
     if show_right_panel:
         col_canvas, col_right = st.columns([5.0, 1.0], gap="large")
@@ -4499,10 +5288,9 @@ def main() -> None:
     if col_right is not None:
         with col_right:
             render_pending_edge_prompt(st)
-            tabs = ["Düğüm", "Bağlantı"]
+            tabs = ["Düğüm", "Bağlantı", "Ayarlar"]
             if st.session_state.show_code:
                 tabs.append("Kod")
-            tabs.append("Ayarlar")
             tabs.append("Kılavuz")
             tab_objs = st.tabs(tabs)
 
@@ -4511,11 +5299,11 @@ def main() -> None:
             idx += 1
             render_edge_panel(tab_objs[idx])
             idx += 1
+            render_settings_panel(tab_objs[idx])
+            idx += 1
             if st.session_state.show_code:
                 render_code_panel(tab_objs[idx])
                 idx += 1
-            render_settings_panel(tab_objs[idx])
-            idx += 1
             render_help_panel(tab_objs[idx])
     else:
         with st.sidebar:
