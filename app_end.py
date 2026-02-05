@@ -1005,6 +1005,18 @@ def get_edge_label(edge: StreamlitFlowEdge) -> str:
     return str(lbl or "")
 
 
+def get_default_edge_label() -> str:
+    """Yeni bağlantılar için varsayılan etiket."""
+    selected_id = st.session_state.get("selected_edge_id")
+    if selected_id:
+        e = find_edge(selected_id)
+        if e is not None:
+            lbl = get_edge_label(e).strip()
+            if lbl:
+                return lbl
+    return str(st.session_state.get("last_edge_label") or "").strip()
+
+
 def get_edge_type(edge: StreamlitFlowEdge) -> str:
     # Edge sınıfı edge_type paramı alıyor ama ReactFlow 'type' kullanıyor.
     v = getattr(edge, "edge_type", None)
@@ -1821,6 +1833,18 @@ def default_handle_positions(direction: str) -> Tuple[str, str]:
     if direction == "BT":
         return "top", "bottom"
     return "bottom", "top"
+
+
+def apply_handle_positions(flow_state: StreamlitFlowState, direction: str) -> None:
+    """Yöne göre tüm düğümlerin bağlantı noktalarını günceller."""
+    if flow_state is None:
+        return
+    src, tgt = default_handle_positions(direction)
+    for n in flow_state.nodes:
+        if hasattr(n, "source_position"):
+            n.source_position = src  # type: ignore[attr-defined]
+        if hasattr(n, "target_position"):
+            n.target_position = tgt  # type: ignore[attr-defined]
 
 
 def edge_style_for_type(
@@ -3467,8 +3491,18 @@ div[data-testid="stExpander"] summary {
 .react-flow__edge-path { stroke: #0f172a !important; stroke-width: 2.6 !important; }
 .react-flow__edge.selected .react-flow__edge-path { stroke: #2563EB !important; stroke-width: 2.6 !important; }
 .react-flow__edge.selected .react-flow__edge-path { stroke-dasharray: 6 4; }
-.react-flow__edge .react-flow__edge-textbg { fill: rgba(255,255,255,0.9) !important; }
-.react-flow__edge .react-flow__edge-text { fill: #0f172a !important; font-weight: 900; }
+.react-flow__edge .react-flow__edge-textbg {
+  fill: #ffffff !important;
+  stroke: #ffffff !important;
+  stroke-width: 8px !important;
+}
+.react-flow__edge .react-flow__edge-text {
+  fill: #0f172a !important;
+  font-weight: 800;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 3px;
+}
 .react-flow__edge.selected .react-flow__edge-text { fill: #1e40af !important; }
 
 /* Düğüm fontu & seçili görünüm */
@@ -4055,6 +4089,8 @@ def initialize_state() -> None:
 
     if "selected_edge_id" not in st.session_state:
         st.session_state.selected_edge_id = None
+    if "last_edge_label" not in st.session_state:
+        st.session_state.last_edge_label = ""
 
     if "js_selected_node_id" not in st.session_state:
         st.session_state.js_selected_node_id = ""
@@ -4485,6 +4521,8 @@ def add_edge(
     st.session_state.flow_state.edges.append(
         make_edge(eid, source, target, label=label, edge_type=edge_type, variant=variant, color=color)
     )
+    if label:
+        st.session_state.last_edge_label = label
     normalize_state(st.session_state.flow_state)
     sync_code_text(generate_mermaid(st.session_state.flow_state, st.session_state.direction))
     st.session_state.history.push(st.session_state.code_text, st.session_state.flow_state, action="add_edge")
@@ -4627,6 +4665,8 @@ def update_edge(
     e.source = source  # type: ignore[attr-defined]
     e.target = target  # type: ignore[attr-defined]
     e.label = label or ""  # type: ignore[attr-defined]
+    if label:
+        st.session_state.last_edge_label = label
     # streamlit-flow edge paramı edge_type ama objede type olabilir
     if hasattr(e, "edge_type"):
         e.edge_type = edge_type  # type: ignore[attr-defined]
@@ -4978,6 +5018,7 @@ def render_settings_panel(container: st.delta_generator.DeltaGenerator) -> None:
     new_dir = DIRECTION_LABELS[new_label]
     if new_dir != st.session_state.direction:
         st.session_state.direction = new_dir
+        apply_handle_positions(st.session_state.flow_state, new_dir)
         if st.session_state.layout_mode == "Otomatik (Ağaç)":
             st.session_state.force_layout_reset = True
         sync_code_text(generate_mermaid(st.session_state.flow_state, new_dir))
@@ -5301,6 +5342,7 @@ def apply_template(code: str, name: str = "Şablon") -> None:
     st.session_state.flow_state = parsed_state
     st.session_state.direction = direction
     st.session_state.force_layout_reset = True
+    apply_handle_positions(st.session_state.flow_state, direction)
     normalize_state(st.session_state.flow_state)
     sync_counters_from_state(st.session_state.flow_state)
     sync_code_text(code)
@@ -5424,6 +5466,7 @@ def apply_ai_flow_template(code: str, topic: str, name: str = "AI Şema") -> Non
     # State'i güncelle
     st.session_state.flow_state = parsed_state
     st.session_state.direction = direction
+    apply_handle_positions(st.session_state.flow_state, direction)
     normalize_state(st.session_state.flow_state)
     sync_counters_from_state(st.session_state.flow_state)
     sync_code_text(generate_mermaid(st.session_state.flow_state, st.session_state.direction))
@@ -5672,6 +5715,8 @@ def render_edge_panel(container: st.delta_generator.DeltaGenerator) -> None:
             label = get_edge_label(edge)
             etype = get_edge_type(edge)
             variant = get_edge_variant(edge)
+            if label:
+                st.session_state.last_edge_label = label
             edge_type_labels = list(EDGE_STYLE_ORDER)
             current_type_label = edge_style_label(etype, variant)
 
@@ -5789,11 +5834,14 @@ def render_edge_builder(container: st.delta_generator.DeltaGenerator, show_heade
     color_labels = ["Otomatik (türe göre)"] + list(EDGE_COLOR_OPTIONS.keys())
     color_label = container.selectbox("Bağlantı Rengi", color_labels, index=0, key="edge_builder_color")
     color_value = None if color_label == "Otomatik (türe göre)" else EDGE_COLOR_OPTIONS.get(color_label)
-    label = container.text_input("Bağlantı Metni (opsiyonel)")
+    if "edge_builder_label" not in st.session_state:
+        st.session_state.edge_builder_label = get_default_edge_label()
+    label = container.text_input("Bağlantı Metni (opsiyonel)", key="edge_builder_label")
 
     if container.button("Bağlantı Oluştur", use_container_width=True):
         spec = EDGE_STYLE_OPTIONS.get(etype_label, {"type": "smoothstep", "variant": "solid"})
-        add_edge(src, tgt, label.strip(), spec["type"], spec["variant"], color=color_value)
+        final_label = label.strip() or get_default_edge_label()
+        add_edge(src, tgt, final_label, spec["type"], spec["variant"], color=color_value)
         st.rerun()
 
 
@@ -5894,6 +5942,8 @@ def render_pending_edge_prompt(container: st.delta_generator.DeltaGenerator) -> 
 
     with container.expander("Yeni Bağlantı Etiketi", expanded=True):
         current = get_edge_label(edge)
+        if not st.session_state.pending_edge_label:
+            st.session_state.pending_edge_label = get_default_edge_label() or current
         st.session_state.pending_edge_label = container.text_input(
             "🏷️ Etiket",
             value=st.session_state.pending_edge_label or current,
@@ -5942,6 +5992,7 @@ def render_code_panel(container: st.delta_generator.DeltaGenerator) -> None:
             st.session_state.code_text = code
             st.session_state.direction = direction
             st.session_state.flow_state = parsed_state  # type: ignore[assignment]
+            apply_handle_positions(st.session_state.flow_state, direction)
             normalize_state(st.session_state.flow_state)
             sync_counters_from_state(st.session_state.flow_state)
             st.session_state.history.push(st.session_state.code_text, st.session_state.flow_state, action="code_edit")
@@ -6197,7 +6248,7 @@ def main() -> None:
             new_edge = find_edge(new_edge_id)
             if new_edge is not None and not get_edge_label(new_edge).strip():
                 st.session_state.pending_edge_id = new_edge_id
-                st.session_state.pending_edge_label = ""
+                st.session_state.pending_edge_label = get_default_edge_label()
 
         # Değişiklik varsa Mermaid'i güncelle
         new_hash = graph_hash(st.session_state.flow_state)
